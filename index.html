@@ -1,0 +1,2051 @@
+<!DOCTYPE html>
+<!--
+=====================================================================================
+ SIMULADOR VISUAL E INTERACTIVO DE RECONSTRUCCIÓN DE MASA INVARIANTE (DIMUONES, CMS)
+ Basado en el notebook educativo "MasaInvariante — análisis de datos del CMS utilizando
+ ROOT y Python" y en el dataset abierto CMS Open Data (record 5201) "Dimuon_DoubleMu.csv".
+-------------------------------------------------------------------------------------
+ NOTAS DE IMPLEMENTACIÓN / SIMPLIFICACIONES (honestidad técnica):
+  1. Archivo único autocontenido. Librerías externas vía CDN: Three.js r128 + OrbitControls,
+     Chart.js 4, PapaParse 5, KaTeX 0.16 y Pyodide 0.25. Requiere conexión a Internet la
+     primera vez para descargar dichas librerías (no hay servidor ni build).
+  2. Pyodide se carga BAJO DEMANDA (botón "Iniciar Python") porque descarga ~15-25 MB
+     (numpy, pandas, scipy, matplotlib). No se carga al abrir la página para no penalizar
+     el arranque del simulador 3D.
+  3. `lmfit` NO forma parte de la distribución oficial de Pyodide. Los fragmentos de ajuste
+     usan `scipy.optimize.curve_fit` con el mismo modelo del notebook (gaussiana + recta),
+     que es matemáticamente equivalente (mínimos cuadrados no lineales). Se incluye un botón
+     opcional que intenta instalar `lmfit` con micropip (es Python puro y suele funcionar,
+     pero depende de la red y de sus dependencias: asteval, uncertainties).
+  4. La geometría del detector es ESQUEMÁTICA pero reconocible (versión 3): se modela con
+     proporciones aproximadas en metros tomadas del diagrama técnico oficial "CMS DETECTOR"
+     (diámetro 15 m, longitud 28.7 m): tracker, preshower, ECAL y HCAL (barril + tapas),
+     solenoide, yugo de retorno de acero en ruedas de 12 sectores (3 capas × 5 ruedas),
+     cuatro estaciones de cámaras de muones en el barril, discos de yugo y cámaras de muones
+     en las tapas, y calorímetros frontales (HF) a ~11 m. NO es un modelo CAD: los conteos de
+     sectores/ruedas/discos son representativos, los espesores están redondeados y el barril
+     se dibuja semitransparente (en vez de en corte) para que se vean las trayectorias. La
+     curvatura de las trayectorias se exagera visualmente (radio ∝ pT, signo según carga)
+     para que sea perceptible: con B = 3.8 T un muon de 40 GeV tendría R ≈ 35 m y se vería
+     recto dentro del detector. La física (Q, M², M) NO se simplifica: es exacta.
+  5. El ajuste en vivo (gaussiana + fondo lineal) está implementado en JavaScript con
+     Levenberg–Marquardt ponderado (pesos 1/max(N,1), estadística de Poisson), sin
+     dependencias externas.
+  6. El CSV se parsea con PapaParse en un Web Worker (archivo local) para no congelar la interfaz;
+     la reproducción usa requestAnimationFrame con lotes por cuadro. Detalle técnico corregido tras
+     pruebas en navegador real: con worker:true, PapaParse no puede clonarle una función al hilo del
+     Worker (`transformHeader` lanzaba DataCloneError), así que el trimming de encabezados con
+     espacios se hace después del parseo, remapeando filas en handleParsedCsv().
+  7. Carga por URL (agregada a solicitud posterior; el diseño original solo contemplaba
+     subida manual de archivo): se hace con `fetch()` y se parsea el texto con el mismo
+     pipeline de validación que el archivo local. El campo viene prellenado con
+     https://raw.githubusercontent.com/cms-opendata-education/cms-jupyter-materials-english/master/Data/Dimuon_DoubleMu.csv,
+     un espejo del mismo dataset (CMS Open Data record 5201) publicado por el repositorio
+     educativo oficial "cms-opendata-education" en GitHub, cuyo contenido se verificó
+     idéntico al del portal (mismo primer evento, M ≈ 17.4922 GeV). Se eligió como
+     default porque raw.githubusercontent.com normalmente sí envía encabezados CORS
+     permisivos; el link directo de opendata.cern.ch (record/5201/files/...) NO funcionó
+     en las pruebas porque esa sección del portal ahora renderiza los archivos vía
+     JavaScript en vez de servir un link de descarga estático. LIMITACIÓN CONOCIDA Y
+     HONESTA para cualquier URL que el usuario pruebe: si abres este HTML con doble clic
+     (protocolo file://), la mayoría de los navegadores bloquean por seguridad cualquier
+     fetch de red desde ese origen; y aunque lo sirvas desde un servidor local, el
+     servidor remoto de esa URL podría no enviar encabezados CORS. En ambos casos el
+     fetch falla con un error de red/CORS que el navegador reporta en su consola; la app
+     lo detecta y sugiere la alternativa de descargar el CSV y cargarlo con el botón de
+     archivo. No se usa ningún proxy CORS de terceros para evitar esto, por ser una
+     dependencia externa poco confiable para una herramienta educativa.
+  8. TIPOGRAFÍA (versión 2): la interfaz y, sobre todo, el panel educativo usan la pila
+     'Aptos','Aptos Display','Calibri','Segoe UI',system-ui,-apple-system,sans-serif.
+     Aptos es una fuente PROPIETARIA de Microsoft (se distribuye con Office 365 / Windows 11
+     modernos) y NO puede alojarse ni servirse desde un CDN público sin licencia. Por eso
+     se usa únicamente como preferencia de fuente DEL SISTEMA: se aplica automáticamente
+     si el usuario ya la tiene instalada y, si no, el navegador cae a Calibri / Segoe UI /
+     la sans-serif del sistema, que son visualmente similares. No hay @font-face ni carga
+     remota de ninguna fuente en este archivo.
+  9. RECUADRO "¿Qué significa este resultado?" (resolución para no expertos, versión 2):
+     es una traducción divulgativa de los parámetros del ajuste. Toma σ del ajuste como
+     "resolución" observada (para el Z⁰ esto mezcla resolución instrumental y anchura
+     natural Γ ≈ 2.5 GeV, lo cual se advierte en el propio recuadro), compara μ con la
+     referencia de literatura MÁS CERCANA de las dos incluidas (Z⁰ = 91.1876 GeV,
+     J/ψ = 3.0969 GeV) y clasifica la diferencia usando σ como escala (≤1σ, ≤3σ, >3σ).
+     Esto NO es un test estadístico formal: no usa la incertidumbre del parámetro μ ni
+     errores sistemáticos; es una guía de lectura, no una afirmación de precisión.
+ 10. ANIMACIÓN (versión 2): el bucle usa delta-time real (ms entre cuadros, acotado a
+     100 ms) tanto para el ritmo de eventos como para el dibujo de trayectorias, con
+     easing (ease-out cúbico) y polilíneas más finas (paso de 0.03 m). "Pausa" congela
+     TODO el estado visual (trayectorias en curso, desvanecimiento y halo del vértice) y
+     "Play" reanuda desde ese mismo instante; "Paso" dibuja el evento con una animación
+     corta y lo deja congelado (se limpian las trayectorias del paso anterior para que se
+     vea solo el evento actual). La cámara orbital sigue activa durante la pausa. A
+     velocidades > 40 eventos/s las trayectorias se dibujan de golpe (varios eventos por
+     cuadro), igual que en la versión anterior.
+ 11. CONTEXTO AÑADIDO (versión 2): los paneles "Acerca de" y "Educativo" incluyen ahora
+     secciones marcadas explícitamente como "contexto añadido por esta herramienta"
+     (qué es un muon, por qué dimuones, propósito, por qué CMS detecta bien muones, por
+     qué una gaussiana). NO son citas del notebook original. La referencia al espectro
+     completo de dimuones de CMS proviene de la diapositiva "Triggering on di-muons at
+     10^32–10^33 with CMS" (G. Tonelli, CERN/INFN/UNIPI, HEP 2011 Grenoble, 25 de julio
+     de 2011); la imagen NO se incluye en este archivo, solo se describe.
+ 12. RENDIMIENTO 3D (versión 3): los elementos repetidos (sectores del yugo, paneles de
+     cámaras de muones, vigas de soporte) se dibujan con THREE.InstancedMesh (una sola
+     llamada de dibujo por familia) y los materiales siguen siendo MeshStandardMaterial
+     simples, sin post-procesado, para no regresar el framerate corregido en la versión 2.
+     Los nombres de las capas en los tooltips siguen la nomenclatura del diagrama oficial
+     (Silicon Trackers, Superconducting Solenoid, Preshower, ECAL, HCAL, Steel Return Yoke,
+     Muon Chambers, Forward Calorimeter). Se mantiene la paleta oscura del simulador.
+ 13. BUG CORREGIDO EN "CÓDIGO PURO" (verificado con Python real + dataset completo, no solo
+     revisión estática): los fragmentos "Zoom al pico del Z⁰", "Ajuste señal+ruido",
+     "Pico del J/ψ" y "Ajuste con lmfit" asumían que `datos['dimuonM']` ya existía, pero
+     solo el fragmento del histograma general la calculaba si faltaba; si el usuario
+     ejecutaba cualquiera de esos cuatro como PRIMER fragmento (orden muy plausible, ya que
+     la lista no obliga a un orden) o pulsaba "↻ Recargar `datos`" antes de repetirlos,
+     Python lanzaba `KeyError: 'dimuonM'`. Se corrigió haciendo cada fragmento autosuficiente:
+     si `dimuonM` no existe, se deriva automáticamente (Q=0 → M² → M) antes de continuar,
+     igual que ya hacía el histograma general; si ya existe, no se recalcula ni se filtra dos
+     veces. Verificado ejecutando los fragmentos reales (extraídos tal cual del código) con
+     Python 3 + pandas/numpy/scipy sobre una muestra real del CSV, reproduciendo el error
+     original y confirmando que la corrección lo elimina sin alterar los resultados numéricos.
+ 14. VISTA DE CORTE / CUTAWAY (versión 4, a solicitud): se usa un plano de recorte de WebGL
+     (renderer.localClippingEnabled + THREE.Plane en x ≈ 0, fijo en el mundo, NO sigue a la
+     cámara) para dejar abierto el lado del detector más cercano a la posición inicial de la
+     cámara. Se aplica solo a las capas tipo "cebolla" (tracker, preshower, ECAL, HCAL,
+     solenoide, yugo, cámaras de muones, tapas y HF); el tubo del haz, la estructura verde de
+     soporte, el punto de colisión y, sobre todo, las TRAYECTORIAS de los muones NUNCA se
+     recortan, para que siempre se vean completas. Simplificación esquemática honesta: al no
+     generarse una "tapa" sólida en la superficie de corte, el borde cortado se ve como una
+     pared hueca abierta en vez de una cara sólida — coherente con que este no es un modelo
+     CAD (nota 4). Si el usuario orbita la cámara hacia el lado opuesto, verá esa mitad
+     completa e intacta.
+=====================================================================================
+-->
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulador de Masa Invariante — CMS Open Data</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+
+<style>
+/* ============================ 0. PALETA / TEMA OSCURO CMS ============================ */
+:root{
+  --bg:#050507; --bg2:#0a0a0f; --panel:#0f1016; --panel2:#141520;
+  --red:#c81d25; --red2:#d62839;
+  --blue1:#1a4d7a; --blue2:#1a6fb0; --blue3:#2f9bd6; --cyan:#5ec8e8;
+  --gold:#f2a900; --gold2:#ffcc33;
+  --green:#2f6b2f; --green2:#4c9a4c;
+  --gray:#8c9096; --silver:#c7c9cc; --text:#f2f2f2;
+  --border:#23242e;
+  /* Pila tipográfica: Aptos (propietaria de Microsoft, solo si está instalada en el sistema;
+     NO se carga de ningún CDN) con alternativas visualmente similares. Ver nota 8. */
+  --font:'Aptos','Aptos Display','Calibri','Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+  --font-display:'Aptos Display','Aptos','Calibri','Segoe UI',system-ui,-apple-system,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px}
+body{display:flex;flex-direction:column;overflow:hidden}
+a{color:var(--cyan)}
+button{font-family:inherit;cursor:pointer}
+h1,h2,h3,h4{margin:0}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#2a2b36;border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:#363746}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+
+/* ============================ HEADER ============================ */
+header{height:56px;flex:0 0 56px;display:flex;align-items:center;gap:14px;padding:0 16px;background:linear-gradient(90deg,#0a0a0f,#12121c);border-bottom:2px solid var(--red)}
+.logo{width:34px;height:34px;border-radius:50%;background:radial-gradient(circle,var(--gold2) 0 18%,#0a0a0f 20% 30%,var(--cyan) 32% 40%,#0a0a0f 42% 52%,var(--gray) 54% 62%,#0a0a0f 64% 74%,var(--red) 76% 88%,transparent 90%);flex:0 0 34px;box-shadow:0 0 12px rgba(242,169,0,.35)}
+header h1{font-size:16px;font-weight:600;letter-spacing:.3px;color:var(--text);white-space:nowrap}
+header h1 small{color:var(--gray);font-weight:400;margin-left:8px;font-size:12px}
+.spacer{flex:1}
+.tabs{display:flex;gap:4px;background:var(--panel);padding:3px;border-radius:8px;border:1px solid var(--border)}
+.tab{background:transparent;border:0;color:var(--gray);padding:6px 14px;border-radius:6px;font-size:13px;transition:background .18s,color .18s}
+.tab:hover{color:var(--text);background:rgba(255,255,255,.04)}
+.tab.active{background:var(--red);color:#fff}
+.hbtn{background:var(--panel);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;font-size:13px;transition:border-color .18s,background .18s,transform .12s}
+.hbtn:hover{border-color:var(--gold);background:var(--panel2)}
+.hbtn:active{transform:translateY(1px)}
+.hbtn.gold{border-color:var(--gold);color:var(--gold2)}
+.langsw{display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.langsw button{background:var(--panel);border:0;color:var(--gray);padding:6px 10px;font-size:12px;transition:background .18s,color .18s}
+.langsw button:hover{color:var(--text)}
+.langsw button.active{background:var(--gold);color:#111;font-weight:600}
+
+/* ============================ LAYOUT ============================ */
+main{flex:1;min-height:0;display:none}
+main.active{display:grid;animation:fadeIn .25s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+#simView{grid-template-columns:300px 1fr 400px;gap:8px;padding:8px}
+.col{min-height:0;display:flex;flex-direction:column;gap:8px;overflow-y:auto;padding-right:2px}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 12px 14px;transition:border-color .2s}
+.panel:hover{border-color:#2d2e3a}
+.panel h3{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--gold);margin-bottom:10px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--border);display:flex;align-items:center}
+.panel h3 .n{display:inline-block;width:18px;height:18px;border-radius:50%;background:var(--red);color:#fff;text-align:center;line-height:18px;font-size:11px;margin-right:6px;flex:none}
+#evHead h3,.row h3{border:0;padding:0;margin:0}
+label{color:var(--silver);font-size:12px;display:block;margin-bottom:3px}
+input[type=number],select,textarea{background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:13px;width:100%;transition:border-color .18s,box-shadow .18s}
+input[type=number]:hover,select:hover,textarea:hover,input[type=text]:hover{border-color:#34354a}
+input[type=number]:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue3);box-shadow:0 0 0 3px rgba(47,155,214,.15)}
+input[type=range]{width:100%;accent-color:var(--gold);cursor:pointer;margin:4px 0}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+.btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:6px;font-size:13px;transition:border-color .15s,background .15s,color .15s,transform .1s,box-shadow .15s}
+.btn:hover{border-color:var(--gray);background:#1a1b28}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--red);border-color:var(--red2);color:#fff}
+.btn.primary:hover{background:var(--red2);box-shadow:0 0 0 3px rgba(214,40,57,.18)}
+.btn.gold{background:var(--gold);border-color:var(--gold2);color:#111;font-weight:600}
+.btn.gold:hover{background:var(--gold2)}
+.btn.green{background:var(--green);border-color:var(--green2);color:#fff}
+.btn.active{border-color:var(--gold);color:var(--gold2);background:rgba(242,169,0,.08)}
+.btn.playing{background:var(--green);border-color:var(--green2);color:#fff;box-shadow:0 0 0 3px rgba(76,154,76,.18)}
+.btn.paused{border-color:var(--gold);color:var(--gold2);background:rgba(242,169,0,.12)}
+.btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.presets{display:grid;grid-template-columns:1fr;gap:6px;margin-bottom:10px}
+.dropzone{border:2px dashed var(--blue1);border-radius:8px;padding:18px 10px;text-align:center;color:var(--gray);cursor:pointer;transition:.2s;font-size:12px}
+.dropzone:hover,.dropzone.over{border-color:var(--cyan);background:rgba(94,200,232,.06);color:var(--text)}
+.dropzone .ic{font-size:26px;color:var(--cyan);display:block;margin-bottom:6px}
+input[type=text]{background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;width:100%;transition:border-color .18s,box-shadow .18s}
+input[type=text]:focus{outline:none;border-color:var(--blue3);box-shadow:0 0 0 3px rgba(47,155,214,.15)}
+.urlLoadBox{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)}
+.urlLoadLabel{font-size:11px;color:var(--gray);margin-bottom:6px}
+.urlLoadRow{display:flex;gap:6px}
+.urlLoadRow input{flex:1;min-width:0}
+.urlLoadRow .btn{flex:0 0 auto;white-space:nowrap}
+.urlLoadHint{font-size:11px;color:var(--gray);margin-top:6px;line-height:1.4}
+#fileStatus{margin-top:8px;font-size:12px;color:var(--gray);word-break:break-word;line-height:1.45}
+#fileStatus.ok{color:var(--green2)}
+#fileStatus.err{color:var(--red2)}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;transition:border-color .2s}
+.stat:hover{border-color:#34354a}
+.stat .v{font-size:18px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.2}
+.stat .l{font-size:10px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;margin-top:3px}
+.stat.acc .v{color:var(--green2)} .stat.rej .v{color:var(--red2)} .stat.gold .v{color:var(--gold2)}
+
+/* ---- 3D center ---- */
+#center{position:relative;min-height:0;display:flex;flex-direction:column;gap:8px}
+#threeWrap{position:relative;flex:1;min-height:280px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg)}
+#threeWrap canvas{display:block}
+#tooltip{position:absolute;pointer-events:none;background:rgba(10,10,15,.94);border:1px solid var(--blue3);border-left:4px solid var(--cyan);color:var(--text);padding:8px 10px;border-radius:6px;font-size:12px;max-width:260px;display:none;z-index:5;line-height:1.45}
+#tooltip b{color:var(--cyan)}
+#hint3d{position:absolute;left:10px;bottom:8px;font-size:11px;color:var(--gray);pointer-events:none}
+#pauseTag{position:absolute;left:10px;top:10px;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:rgba(242,169,0,.12);border:1px solid var(--gold);color:var(--gold2);border-radius:6px;padding:4px 8px;pointer-events:none;display:none}
+#legend3d{position:absolute;right:10px;top:10px;font-size:11px;background:rgba(10,10,15,.7);border:1px solid var(--border);border-radius:6px;padding:6px 8px;pointer-events:none;line-height:1.6}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+#eventPanel{flex:0 0 auto}
+.evgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:12px}
+.ev{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+.ev .k{color:var(--gray);font-size:10px;text-transform:uppercase}
+.ev .v{font-variant-numeric:tabular-nums;color:var(--text)}
+.ev.mu1{border-color:rgba(255,204,51,.5)} .ev.mu2{border-color:rgba(94,200,232,.5)}
+.badge{display:inline-block;padding:4px 10px;border-radius:14px;font-size:12px;font-weight:600;letter-spacing:.3px;transition:background .2s,color .2s}
+.badge.ok{background:rgba(76,154,76,.2);color:var(--green2);border:1px solid var(--green2)}
+.badge.no{background:rgba(214,40,57,.18);color:var(--red2);border:1px solid var(--red2)}
+.badge.none{background:var(--bg2);color:var(--gray);border:1px solid var(--border)}
+#evHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+#evM{font-size:22px;font-weight:700;color:var(--gold2);font-variant-numeric:tabular-nums}
+#progressBar{height:4px;background:var(--bg2);border-radius:2px;overflow:hidden;margin-top:10px}
+#progressBar div{height:100%;width:0;background:linear-gradient(90deg,var(--blue3),var(--gold));transition:width .1s}
+
+/* ---- right ---- */
+#chartWrap{position:relative;height:300px;flex:0 0 300px}
+.chartLegend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--silver);margin-top:6px}
+.chartLegend .crl{display:inline-flex;align-items:center;gap:5px}
+.chartLegend .crl i{width:10px;height:10px;border-radius:2px;display:inline-block;flex:none}
+.chartLegendNote{font-size:10.5px;color:var(--gray);margin-top:6px;line-height:1.4;border-top:1px dashed var(--border);padding-top:6px}
+.toggles{display:flex;gap:12px;font-size:12px;margin-top:8px;color:var(--silver);flex-wrap:wrap}
+.toggles label{display:flex;align-items:center;gap:5px;cursor:pointer;margin:0}
+.toggles input{accent-color:var(--gold)}
+.fitgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px}
+.fit{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 8px}
+.fit .k{color:var(--gray);font-size:10px}
+.fit .v{color:var(--cyan);font-variant-numeric:tabular-nums;font-size:14px}
+.fit.gold .v{color:var(--gold2)}
+#fitMsg{font-size:12px;color:var(--gray);margin-top:8px;line-height:1.45}
+.ref{font-size:11px;color:var(--gray);margin-top:8px;border-top:1px solid var(--border);padding-top:6px;line-height:1.45}
+/* Recuadro divulgativo de resolución (ver nota 9) */
+.resbox{margin-top:10px;border:1px solid rgba(242,169,0,.35);border-left:3px solid var(--gold);background:linear-gradient(90deg,rgba(242,169,0,.08),rgba(242,169,0,.01));border-radius:0 8px 8px 0;padding:10px 12px;font-size:12.5px;line-height:1.55;animation:fadeIn .3s ease}
+.resbox .rb-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--gold2);font-weight:600;margin-bottom:6px}
+.resbox p{margin:0 0 7px;color:#e2e2e6}
+.resbox p:last-child{margin-bottom:0}
+.resbox b{color:var(--gold2)}
+.resbox .rb-note{color:var(--gray);font-size:11.5px;border-top:1px dashed var(--border);padding-top:6px}
+.resbox .rb-done{color:var(--green2);font-size:11.5px}
+
+/* ============================ CODE VIEW ============================ */
+#codeView{grid-template-columns:260px 1fr 1fr;gap:8px;padding:8px}
+#codeView .panel{min-height:0;display:flex;flex-direction:column}
+.snippet{background:var(--bg2);border:1px solid var(--border);border-left:3px solid var(--blue2);border-radius:6px;padding:8px 10px;margin-bottom:6px;cursor:pointer;font-size:12px;transition:border-color .15s,background .15s}
+.snippet:hover{border-left-color:var(--gold);background:var(--panel2)}
+.snippet .t{color:var(--text);font-weight:600}
+.snippet .d{color:var(--gray);font-size:11px;margin-top:2px}
+#pyEditor{flex:1;min-height:260px;font-family:Consolas,"Courier New",monospace;font-size:13px;line-height:1.45;resize:none;background:#07070b;color:#e8e8ec;border-color:var(--border);tab-size:4}
+#pyOut{flex:1;min-height:0;overflow:auto;background:#07070b;border:1px solid var(--border);border-radius:6px;padding:10px;font-family:Consolas,"Courier New",monospace;font-size:12.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+#pyOut .err{color:var(--red2)}
+#pyOut .info{color:var(--gray);font-style:italic}
+#pyOut .ok{color:var(--green2)}
+#pyOut img{max-width:100%;border:1px solid var(--border);border-radius:6px;margin:6px 0;display:block}
+#pyOut table{border-collapse:collapse;font-size:11px;margin:6px 0;color:var(--text)}
+#pyOut table th,#pyOut table td{border:1px solid var(--border);padding:2px 6px;text-align:right}
+#pyOut table th{background:var(--panel2);color:var(--gold2)}
+.pystatus{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray);margin-bottom:8px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--gray);flex:none}
+.dot.busy{background:var(--gold);animation:pulse 1s infinite}
+.dot.ready{background:var(--green2)}
+.dot.err{background:var(--red2)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.codebar{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.codebar .btn{flex:none}
+
+/* ============================ MODALES ============================ */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .22s ease,visibility .22s}
+.modal.open{opacity:1;visibility:visible;pointer-events:auto}
+.modal .box{background:var(--panel);border:1px solid var(--border);border-top:3px solid var(--red);border-radius:12px;width:min(920px,100%);max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6);transform:translateY(10px) scale(.985);transition:transform .24s cubic-bezier(.2,.8,.2,1)}
+.modal.open .box{transform:none}
+#eduModal .box{width:min(1080px,100%)}
+.modal .head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border)}
+.modal .head h2{font-size:18px;color:var(--text)}
+.modal .body{padding:18px 22px;overflow-y:auto;line-height:1.6;font-size:14px;scroll-behavior:smooth}
+.modal .body h3{color:var(--gold);font-size:15px;margin:18px 0 6px}
+.modal .body h3:first-child{margin-top:0}
+.modal .body h4{color:var(--cyan);font-size:13px;margin:12px 0 4px}
+.modal .body p{margin:6px 0;color:#e2e2e6}
+.modal .body ul{margin:6px 0;padding-left:20px}
+.modal .body li{margin:3px 0}
+.modal .foot{padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
+.quote{border-left:3px solid var(--blue2);background:var(--bg2);padding:8px 14px;margin:8px 0;border-radius:0 6px 6px 0}
+.eq{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px;margin:8px 0;overflow-x:auto;text-align:center}
+.eq .katex{font-size:1.15em}
+.laylist{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.lay{display:flex;gap:8px;align-items:flex-start;background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px}
+.lay .sw{flex:none;margin-top:4px;width:14px;height:14px}
+.credit{background:linear-gradient(90deg,rgba(200,29,37,.15),rgba(242,169,0,.1));border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-top:14px;font-size:13px}
+.qs li{margin:6px 0}
+.kbd{background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:0 5px;font-family:monospace;font-size:12px}
+/* Bloques de contexto AÑADIDO por la herramienta (no citas del notebook) */
+.added{border:1px solid var(--border);border-left:3px solid var(--gold);background:rgba(242,169,0,.04);padding:12px 16px 14px;border-radius:0 8px 8px 0;margin:18px 0}
+.added-tag{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--gold2);font-weight:600;margin-bottom:4px}
+.modal .body .added h3{margin-top:12px}
+.modal .body .added h3:first-of-type{margin-top:6px}
+.modal .body .added p,.modal .body .added li{line-height:1.65}
+
+/* ============================ PANEL EDUCATIVO (documento) ============================ */
+.edudoc{font-family:var(--font);display:grid;grid-template-columns:200px minmax(0,1fr);gap:0;align-items:start}
+.edunav{position:sticky;top:0;align-self:start;border-right:1px solid var(--border);padding:4px 14px 18px 0;margin-right:26px}
+.edunav .lbl{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--gray);margin:0 0 8px 10px}
+.edunav a{display:block;color:var(--silver);text-decoration:none;font-size:12.5px;padding:6px 10px;border-left:2px solid transparent;border-radius:0 6px 6px 0;line-height:1.35;transition:color .15s,background .15s,border-color .15s}
+.edunav a:hover{color:var(--text);background:rgba(255,255,255,.03)}
+.edunav a.active{color:var(--gold2);border-left-color:var(--gold);background:rgba(242,169,0,.06)}
+.educontent{max-width:74ch;min-width:0}
+.edu-hero{padding:2px 0 18px;border-bottom:2px solid var(--red);margin-bottom:28px}
+.edu-kicker{font-size:11px;letter-spacing:1.6px;text-transform:uppercase;color:var(--red2);font-weight:600;margin-bottom:8px}
+.edu-title{font-family:var(--font-display);font-size:30px;font-weight:700;letter-spacing:-.4px;line-height:1.12;color:var(--text);margin:0}
+.modal .body .edu-sub{font-size:15.5px;color:var(--gray);margin:10px 0 0;line-height:1.55;font-weight:400}
+.edusec{padding:4px 0 28px;margin-bottom:10px;border-bottom:1px solid var(--border);scroll-margin-top:8px}
+.edusec:last-child{border-bottom:0}
+.modal .body .edusec h2{font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--gold2);margin:0 0 14px;line-height:1.25;letter-spacing:-.2px;display:flex;align-items:baseline;gap:10px}
+.modal .body .edusec h2 .num{font-size:13px;font-weight:700;color:var(--red2);border:1px solid var(--red2);border-radius:5px;padding:1px 7px;font-variant-numeric:tabular-nums;flex:none;transform:translateY(-3px)}
+.modal .body .edusec h3{font-size:15.5px;font-weight:600;color:var(--cyan);margin:20px 0 6px}
+.modal .body .edusec p{font-size:15px;line-height:1.72;color:#e2e2e6;margin:0 0 12px}
+.modal .body .edusec p.lead{font-size:16.5px;color:var(--silver);line-height:1.6}
+.modal .body .edusec ul{margin:0 0 12px;padding-left:22px}
+.modal .body .edusec li{font-size:14.5px;line-height:1.65;margin:5px 0}
+.modal .body .edusec .eq{margin:12px 0}
+.modal .body .edusec code{background:var(--panel2);border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:.9em}
+.callout{border:1px solid var(--border);border-left:3px solid var(--blue3);background:var(--bg2);border-radius:0 8px 8px 0;padding:10px 14px;margin:14px 0;font-size:14px;line-height:1.62;color:#e2e2e6}
+.callout.gold{border-left-color:var(--gold)}
+.callout.red{border-left-color:var(--red)}
+.callout.green{border-left-color:var(--green2)}
+.callout .ct{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--gray);margin-bottom:4px;font-weight:600}
+.modal .body .edusec .laylist{margin-top:6px}
+.modal .body .edusec .lay{font-size:13px;line-height:1.5}
+
+@media (max-width:1100px){
+  #simView{grid-template-columns:1fr;overflow-y:auto}
+  #codeView{grid-template-columns:1fr}
+  #threeWrap{min-height:360px}
+  header h1 small{display:none}
+}
+@media (max-width:760px){
+  .edudoc{grid-template-columns:1fr}
+  .edunav{position:sticky;top:-18px;z-index:2;background:var(--panel);border-right:0;border-bottom:1px solid var(--border);display:flex;overflow-x:auto;gap:4px;padding:8px 0 8px;margin:-18px 0 16px}
+  .edunav .lbl{display:none}
+  .edunav a{white-space:nowrap;border-left:0;border-bottom:2px solid transparent;border-radius:6px 6px 0 0}
+  .edunav a.active{border-bottom-color:var(--gold)}
+  .edu-title{font-size:24px}
+  .laylist{grid-template-columns:1fr}
+  .evgrid{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================ HEADER ============================ -->
+<header>
+  <div class="logo"></div>
+  <h1><span data-i18n="app_title">Simulador de Masa Invariante</span><small data-i18n="app_sub">CMS Open Data · Dimuones</small></h1>
+  <div class="spacer"></div>
+  <div class="tabs">
+    <button class="tab active" id="tabSim" data-i18n="tab_sim">Simulador</button>
+    <button class="tab" id="tabCode" data-i18n="tab_code">Código puro (Python)</button>
+  </div>
+  <button class="hbtn gold" id="btnAbout" data-i18n="btn_about">ⓘ Acerca de esta herramienta</button>
+  <button class="hbtn" id="btnEdu" data-i18n="btn_edu">📘 Panel educativo</button>
+  <div class="langsw"><button id="langEs" class="active">ES</button><button id="langEn">EN</button></div>
+</header>
+
+<!-- ============================ VISTA SIMULADOR ============================ -->
+<main id="simView" class="active">
+  <!-- Columna izquierda: controles -->
+  <div class="col">
+    <div class="panel">
+      <h3><span class="n">1</span><span data-i18n="load_title">Cargar datos (CSV)</span></h3>
+      <div class="dropzone" id="dropzone">
+        <span class="ic">⬆</span>
+        <span data-i18n="drop_text">Arrastra aquí el archivo Dimuon_DoubleMu.csv o haz clic para seleccionar</span>
+      </div>
+      <input type="file" id="fileInput" accept=".csv,text/csv" style="display:none">
+      <div id="fileStatus" data-i18n="file_none">Ningún archivo cargado.</div>
+      <div class="urlLoadBox">
+        <div class="urlLoadLabel" data-i18n="url_label">…o cargar desde una URL:</div>
+        <div class="urlLoadRow">
+          <input type="text" id="urlInput"
+                 placeholder="https://raw.githubusercontent.com/cms-opendata-education/cms-jupyter-materials-english/master/Data/Dimuon_DoubleMu.csv"
+                 value="https://raw.githubusercontent.com/cms-opendata-education/cms-jupyter-materials-english/master/Data/Dimuon_DoubleMu.csv">
+          <button class="btn" id="btnLoadUrl" data-i18n="btn_load_url">Cargar URL</button>
+        </div>
+        <div class="urlLoadHint" data-i18n="url_hint">
+          Nota: si abres este archivo con doble clic (file://) o el servidor de origen no permite CORS,
+          la carga por URL puede fallar por restricciones de seguridad del navegador. Si eso pasa,
+          descarga el CSV y cárgalo con el botón de arriba.
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3><span class="n">2</span><span data-i18n="range_title">Rango de masa invariante (GeV)</span></h3>
+      <div class="presets">
+        <button class="btn" id="preZ" data-i18n="preset_z">Pico Z⁰ (75–105 GeV)</button>
+        <button class="btn" id="preJ" data-i18n="preset_jpsi">Pico J/ψ (2.9–3.3 GeV)</button>
+        <button class="btn active" id="preAll" data-i18n="preset_all">Todo el espectro (0–120 GeV)</button>
+      </div>
+      <div class="row">
+        <div><label data-i18n="lbl_min">Mínimo</label><input type="number" id="rMin" value="0" step="0.1"></div>
+        <div><label data-i18n="lbl_max">Máximo</label><input type="number" id="rMax" value="120" step="0.1"></div>
+        <div><label data-i18n="lbl_bins">Bines</label><input type="number" id="nBins" value="120" min="5" max="400" step="1"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3><span class="n">3</span><span data-i18n="count_title">Eventos a procesar</span></h3>
+      <div class="row">
+        <select id="countSel">
+          <option value="100">100</option><option value="500">500</option><option value="1000">1000</option>
+          <option value="5000">5000</option><option value="10000" selected>10000</option>
+          <option value="all" data-i18n="opt_all">Todos</option><option value="custom" data-i18n="opt_custom">Personalizado…</option>
+        </select>
+        <input type="number" id="countCustom" value="2000" min="1" step="1" style="display:none">
+      </div>
+      <div style="font-size:11px;color:var(--gray);margin-top:6px" id="countInfo"></div>
+    </div>
+
+    <div class="panel">
+      <h3><span class="n">4</span><span data-i18n="play_title">Reproducción</span></h3>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn primary" id="btnPlay" data-i18n="btn_play">▶ Play</button>
+        <button class="btn" id="btnPause" data-i18n="btn_pause">❚❚ Pausa</button>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <button class="btn" id="btnStep" data-i18n="btn_step">⏭ Paso</button>
+        <button class="btn" id="btnReset" data-i18n="btn_reset">↺ Reiniciar</button>
+      </div>
+      <label><span data-i18n="lbl_speed">Velocidad</span>: <b id="speedVal" style="color:var(--gold2)">20</b> <span data-i18n="lbl_eps">eventos/s</span></label>
+      <input type="range" id="speed" min="0" max="100" value="39">
+      <div id="progressBar"><div id="progressFill"></div></div>
+    </div>
+
+    <div class="panel">
+      <h3 data-i18n="stats_title">Estadísticas en vivo</h3>
+      <div class="stats">
+        <div class="stat"><div class="v" id="stTotal">0</div><div class="l" data-i18n="st_total">Eventos procesados</div></div>
+        <div class="stat acc"><div class="v" id="stAcc">0</div><div class="l" data-i18n="st_acc">Aceptados (Q=0, M²&gt;0)</div></div>
+        <div class="stat rej"><div class="v" id="stRej">0</div><div class="l" data-i18n="st_rej">Descartados</div></div>
+        <div class="stat"><div class="v" id="stIn">0</div><div class="l" data-i18n="st_inrange">Aceptados en rango</div></div>
+        <div class="stat gold"><div class="v" id="stMean">—</div><div class="l" data-i18n="st_mean">Masa media en rango (GeV)</div></div>
+        <div class="stat gold"><div class="v" id="stStd">—</div><div class="l" data-i18n="st_std">Desv. estándar (GeV)</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Columna central: 3D + evento -->
+  <div id="center">
+    <div id="threeWrap">
+      <div id="tooltip"></div>
+      <div id="pauseTag" data-i18n="pause_tag">❚❚ Pausa — estado congelado</div>
+      <div id="legend3d">
+        <div><span class="sw" style="background:#ffcc33"></span><span data-i18n="lg_mu1">Muon 1</span></div>
+        <div><span class="sw" style="background:#5ec8e8"></span><span data-i18n="lg_mu2">Muon 2</span></div>
+        <div><span class="sw" style="background:#f2a900;border-radius:50%"></span><span data-i18n="lg_vertex">Punto de colisión</span></div>
+      </div>
+      <div id="hint3d" data-i18n="hint3d">Arrastra para rotar · rueda para zoom · pasa el mouse sobre las capas</div>
+    </div>
+    <div class="panel" id="eventPanel">
+      <div id="evHead">
+        <h3 style="margin:0" data-i18n="event_title">Evento actual</h3>
+        <span class="badge none" id="evBadge" data-i18n="ev_none">Sin evento</span>
+      </div>
+      <div class="evgrid">
+        <div class="ev"><div class="k">Run / Event</div><div class="v" id="evId">—</div></div>
+        <div class="ev"><div class="k">Q = Q₁+Q₂</div><div class="v" id="evQ">—</div></div>
+        <div class="ev"><div class="k">M² (GeV²)</div><div class="v" id="evM2">—</div></div>
+        <div class="ev"><div class="k">M = √M² (GeV)</div><div class="v" id="evM">—</div></div>
+        <div class="ev mu1"><div class="k">μ₁ E, Q₁</div><div class="v" id="evMu1">—</div></div>
+        <div class="ev mu1"><div class="k">μ₁ (px, py, pz)</div><div class="v" id="evP1">—</div></div>
+        <div class="ev mu2"><div class="k">μ₂ E, Q₂</div><div class="v" id="evMu2">—</div></div>
+        <div class="ev mu2"><div class="k">μ₂ (px, py, pz)</div><div class="v" id="evP2">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Columna derecha: histograma + ajuste -->
+  <div class="col">
+    <div class="panel">
+      <h3 data-i18n="hist_title">Histograma de masa invariante (en vivo)</h3>
+      <div id="chartWrap"><canvas id="histChart"></canvas></div>
+      <div id="chartLegend" class="chartLegend"></div>
+      <div class="toggles">
+        <label><input type="checkbox" id="logX"> <span data-i18n="lbl_logx">Eje X logarítmico</span></label>
+        <label><input type="checkbox" id="logY"> <span data-i18n="lbl_logy">Eje Y logarítmico</span></label>
+        <label><input type="checkbox" id="showFit" checked> <span data-i18n="lbl_showfit">Mostrar ajuste</span></label>
+      </div>
+      <div class="chartLegendNote" data-i18n="mr_note">Bandas de color: ventanas de masa de resonancias conocidas (referencia PDG), añadidas con fines pedagógicos — no representan las rutas de disparo (trigger paths) de la diapositiva de referencia de CMS.</div>
+    </div>
+    <div class="panel">
+      <h3 data-i18n="fit_title">Ajuste señal + fondo: gaussiana + recta</h3>
+      <div class="fitgrid">
+        <div class="fit gold"><div class="k">μ (<span data-i18n="fit_mu">centro</span>) [GeV]</div><div class="v" id="fMu">—</div></div>
+        <div class="fit gold"><div class="k">σ (<span data-i18n="fit_sigma">anchura</span>) [GeV]</div><div class="v" id="fSig">—</div></div>
+        <div class="fit"><div class="k">A (<span data-i18n="fit_A">amplitud</span>)</div><div class="v" id="fA">—</div></div>
+        <div class="fit"><div class="k">χ²/ndf</div><div class="v" id="fChi">—</div></div>
+        <div class="fit"><div class="k">a (<span data-i18n="fit_b0">intercepto fondo</span>)</div><div class="v" id="fB0">—</div></div>
+        <div class="fit"><div class="k">b (<span data-i18n="fit_b1">pendiente fondo</span>) [1/GeV]</div><div class="v" id="fB1">—</div></div>
+      </div>
+      <div id="fitMsg" data-i18n="fit_wait">Esperando eventos en el rango seleccionado…</div>
+      <div id="resBox" class="resbox" style="display:none">
+        <div class="rb-title" id="rbTitle"></div>
+        <div id="rbBody"></div>
+      </div>
+      <div class="ref" data-i18n="ref_masses">Referencia (literatura): m(Z⁰) = 91.1876 GeV · m(J/ψ) = 3.0969 GeV. Modelo: f(M) = a + b·M + A·exp[−(M−μ)²/2σ²].</div>
+    </div>
+  </div>
+</main>
+
+<!-- ============================ VISTA CÓDIGO PURO ============================ -->
+<main id="codeView">
+  <div class="panel" style="overflow-y:auto">
+    <h3 data-i18n="snippets_title">Fragmentos del notebook original</h3>
+    <p style="font-size:12px;color:var(--gray);margin:0 0 10px" data-i18n="snippets_help">Haz clic en un fragmento para copiarlo al editor. Corresponden a las celdas clave del notebook (pandas + numpy + matplotlib + scipy).</p>
+    <div id="snippetList"></div>
+  </div>
+  <div class="panel">
+    <div class="pystatus"><span class="dot" id="pyDot"></span><span id="pyStatus" data-i18n="py_idle">Python no iniciado. Pulsa "Iniciar Python" (descarga ~20 MB la primera vez).</span></div>
+    <div class="codebar">
+      <button class="btn gold" id="btnInitPy" data-i18n="btn_init_py">⚡ Iniciar Python (Pyodide)</button>
+      <button class="btn primary" id="btnRunPy" disabled data-i18n="btn_run">▶ Ejecutar</button>
+      <button class="btn" id="btnReloadData" disabled data-i18n="btn_reload_data">↻ Recargar `datos`</button>
+      <button class="btn" id="btnLmfit" disabled data-i18n="btn_lmfit">📦 Instalar lmfit (opcional)</button>
+    </div>
+    <textarea id="pyEditor" spellcheck="false"></textarea>
+    <div style="font-size:11px;color:var(--gray);margin-top:6px" data-i18n="editor_hint">Variables disponibles: <b>datos</b> (DataFrame con el CSV cargado), <b>pd</b>, <b>np</b>, <b>plt</b>. Ctrl+Enter ejecuta.</div>
+  </div>
+  <div class="panel">
+    <div class="row" style="margin-bottom:8px">
+      <h3 style="margin:0" data-i18n="out_title">Salida</h3>
+      <button class="btn" id="btnClearOut" style="flex:none" data-i18n="btn_clear">Limpiar salida</button>
+    </div>
+    <div id="pyOut"></div>
+  </div>
+</main>
+
+<!-- ============================ MODAL: ACERCA DE ============================ -->
+<div class="modal open" id="aboutModal">
+  <div class="box">
+    <div class="head"><h2 data-i18n="about_title">Acerca de esta herramienta</h2><button class="hbtn" id="aboutClose1">✕</button></div>
+    <div class="body" id="aboutBody"></div>
+    <div class="foot"><button class="btn" id="btnAboutEdu" data-i18n="btn_edu">📘 Panel educativo</button><button class="btn gold" id="aboutClose2" data-i18n="btn_start">Comenzar a explorar →</button></div>
+  </div>
+</div>
+
+<!-- ============================ MODAL: EDUCATIVO ============================ -->
+<div class="modal" id="eduModal">
+  <div class="box">
+    <div class="head"><h2 data-i18n="edu_title">Panel educativo</h2><button class="hbtn" id="eduClose1">✕</button></div>
+    <div class="body" id="eduBody"></div>
+    <div class="foot"><button class="btn gold" id="eduClose2" data-i18n="btn_close">Cerrar</button></div>
+  </div>
+</div>
+
+<script>
+/* =====================================================================================
+   1. INTERNACIONALIZACIÓN (ES / EN)
+   ===================================================================================== */
+const T = {
+es:{
+ app_title:"Simulador de Masa Invariante", app_sub:"CMS Open Data · Dimuones",
+ tab_sim:"Simulador", tab_code:"Código puro (Python)", btn_about:"ⓘ Acerca de esta herramienta", btn_edu:"📘 Panel educativo",
+ load_title:"Cargar datos (CSV)", drop_text:"Arrastra aquí el archivo Dimuon_DoubleMu.csv o haz clic para seleccionar",
+ file_none:"Ningún archivo cargado.", file_loading:"Leyendo y parseando el archivo…", file_ok:"✔ {n} eventos cargados desde {f}. Columnas OK.",
+ err_cols:"✖ Faltan columnas requeridas: {c}. Se esperan las columnas de Dimuon_DoubleMu.csv (E1, px1, py1, pz1, Q1, E2, px2, py2, pz2, Q2).",
+ err_parse:"✖ Error al parsear el CSV: {e}", err_empty:"✖ El archivo no contiene filas válidas.",
+ url_label:"…o cargar desde una URL:", btn_load_url:"Cargar URL",
+ url_hint:"Nota: si abres este archivo con doble clic (file://) o el servidor de origen no permite CORS, la carga por URL puede fallar por restricciones de seguridad del navegador. Si eso pasa, descarga el CSV y cárgalo con el botón de arriba.",
+ url_empty:"✖ Escribe una URL antes de cargar.",
+ url_loading:"Descargando datos desde la URL…",
+ err_url_http:"✖ El servidor respondió con error {s} al pedir la URL.",
+ err_url_fetch:"✖ No se pudo cargar la URL (probablemente bloqueado por CORS o por abrir el archivo con file://). Descarga el CSV manualmente y cárgalo con el botón de arriba. Detalle técnico: {e}",
+ range_title:"Rango de masa invariante (GeV)", preset_z:"Pico Z⁰ (75–105 GeV)", preset_jpsi:"Pico J/ψ (2.9–3.3 GeV)", preset_all:"Todo el espectro (0–120 GeV)",
+ lbl_min:"Mínimo", lbl_max:"Máximo", lbl_bins:"Bines",
+ count_title:"Eventos a procesar", opt_all:"Todos", opt_custom:"Personalizado…", count_info:"Se procesarán {n} de {t} eventos.",
+ play_title:"Reproducción", btn_play:"▶ Play", btn_pause:"❚❚ Pausa", btn_step:"⏭ Paso", btn_reset:"↺ Reiniciar", lbl_speed:"Velocidad", lbl_eps:"eventos/s",
+ pause_tag:"❚❚ Pausa — estado congelado (puedes orbitar la cámara)",
+ stats_title:"Estadísticas en vivo", st_total:"Eventos procesados", st_acc:"Aceptados (Q=0, M²>0)", st_rej:"Descartados", st_inrange:"Aceptados en rango",
+ st_mean:"Masa media en rango (GeV)", st_std:"Desv. estándar (GeV)",
+ lg_mu1:"Muon 1", lg_mu2:"Muon 2", lg_vertex:"Punto de colisión", hint3d:"Arrastra para rotar · rueda para zoom · pasa el mouse sobre las capas · vista de corte: un lado queda abierto",
+ event_title:"Evento actual", ev_none:"Sin evento", ev_ok:"✔ ACEPTADO (Q = 0, M² > 0)", ev_no_q:"✖ DESCARTADO (Q ≠ 0)", ev_no_m:"✖ DESCARTADO (M² ≤ 0)", ev_done:"Reproducción finalizada",
+ hist_title:"Histograma de masa invariante (en vivo)", lbl_logx:"Eje X logarítmico", lbl_logy:"Eje Y logarítmico", lbl_showfit:"Mostrar ajuste",
+ ch_counts:"Eventos por bin", ch_fit:"Ajuste gauss + recta", ax_m:"Masa invariante M [GeV]", ax_n:"Número de eventos",
+ mr_omega_phi:"ω / φ (mesones ligeros)", mr_jpsi:"J/ψ (charmonio)", mr_psi2s:"ψ′ (charmonio excitado)", mr_upsilon:"Υ (bottomonio)", mr_z0:"Z⁰ (bosón débil)", mr_other:"Continuo / otros pares",
+ mr_note:"Bandas de color: ventanas de masa de resonancias conocidas (referencia PDG), añadidas con fines pedagógicos — no representan las rutas de disparo (trigger paths) de la diapositiva de referencia de CMS.",
+ fit_title:"Ajuste señal + fondo: gaussiana + recta", fit_mu:"centro", fit_sigma:"anchura", fit_A:"amplitud", fit_b0:"intercepto fondo", fit_b1:"pendiente fondo",
+ fit_wait:"Esperando eventos en el rango seleccionado… (se requieren ≥ 30 eventos en rango)", fit_ok:"Ajuste convergido con {n} eventos en rango. Δ vs referencia más cercana: {d} GeV.",
+ fit_bad:"El ajuste no converge bien (pico fuera de rango o σ demasiado grande). Prueba un rango más estrecho o más eventos.",
+ ref_masses:"Referencia (literatura): m(Z⁰) = 91.1876 GeV · m(J/ψ) = 3.0969 GeV. Modelo: f(M) = a + b·M + A·exp[−(M−μ)²/2σ²]. Errores: pesos de Poisson 1/max(N,1).",
+ res_title:"¿Qué significa este resultado? La resolución del detector, en palabras sencillas",
+ res_p1:"El detector no mide la masa de forma perfecta: cada medición individual tiene un pequeño margen de error. Por eso el pico no es una línea vertical, sino una campana (gaussiana) con cierto ancho. Ese ancho es, en la práctica, la <b>resolución</b> del instrumento en esta región de masa.",
+ res_p2:"Ancho medido σ = <b>{s} GeV</b>, es decir, un <b>{pct} %</b> del centro del pico. Esto significa que una medición individual de masa cerca de este pico puede variar típicamente ±{s} GeV solo por la precisión del instrumento, no porque la partícula realmente tenga esa masa.",
+ res_p3:"Tu ajuste da un centro de <b>{mu} GeV</b>; el valor conocido más cercano de la literatura es <b>{ref} GeV</b> ({name}). La diferencia de <b>{d} GeV</b> ({dpct} %) {verdict}",
+ res_within:"cabe holgadamente dentro del margen de error de la medición (es menor que σ).",
+ res_near:"es del orden del margen de error de la medición (entre 1 y 3 σ): razonable con esta estadística, pero conviene procesar más eventos o revisar el rango.",
+ res_far:"es mayor que 3 σ: el pico ajustado probablemente no corresponde a esta referencia (puede ser otra resonancia, p. ej. ψ' o ϒ, o un ajuste dominado por el fondo). Prueba un preset (Z⁰ o J/ψ).",
+ res_note_z:"Nota honesta: en el Z⁰ parte del ancho observado es su anchura natural (Γ ≈ 2.5 GeV), no solo resolución instrumental. Esta comparación usa σ como escala de referencia, no la incertidumbre estadística formal del parámetro μ.",
+ res_note_j:"Nota honesta: en el J/ψ la anchura natural (≈ 0.09 MeV) es despreciable, así que σ es prácticamente pura resolución instrumental. Esta comparación usa σ como escala de referencia, no la incertidumbre estadística formal de μ.",
+ res_done:"✔ Reproducción finalizada: estos son los valores finales con {n} eventos en rango.",
+ res_live:"Se actualiza en vivo a medida que llegan eventos ({n} en rango hasta ahora).",
+ snippets_title:"Fragmentos del notebook original", snippets_help:"Haz clic en un fragmento para copiarlo al editor. Corresponden a las celdas clave del notebook (pandas + numpy + matplotlib + scipy).",
+ py_idle:"Python no iniciado. Pulsa \"Iniciar Python\" (descarga ~20 MB la primera vez).", py_loading:"Descargando Pyodide y paquetes (numpy, pandas, scipy, matplotlib)…", py_ready:"Python listo. DataFrame `datos` cargado con {n} filas.",
+ py_ready_nodata:"Python listo, pero no hay CSV cargado. Carga un archivo en la pestaña Simulador y pulsa \"Recargar datos\".", py_error:"Error al iniciar Pyodide: {e}", py_running:"Ejecutando…",
+ btn_init_py:"⚡ Iniciar Python (Pyodide)", btn_run:"▶ Ejecutar", btn_reload_data:"↻ Recargar `datos`", btn_lmfit:"📦 Instalar lmfit (opcional)", btn_clear:"Limpiar salida", out_title:"Salida",
+ editor_hint:"Variables disponibles: <b>datos</b> (DataFrame con el CSV cargado), <b>pd</b>, <b>np</b>, <b>plt</b>. Ctrl+Enter ejecuta.",
+ py_no_data:"No hay datos: carga primero un CSV en la pestaña Simulador.", lmfit_try:"Intentando instalar lmfit con micropip…", lmfit_ok:"lmfit instalado correctamente. Puedes usar `from lmfit.models import GaussianModel, LinearModel`.",
+ lmfit_fail:"No se pudo instalar lmfit ({e}). Usa scipy.optimize.curve_fit (fragmento de ajuste), que implementa el mismo modelo.",
+ sn_explore:"Explorar los datos", sn_explore_d:"datos.head(), columnas, tamaño",
+ sn_q:"Carga del dimuon y filtro Q = 0", sn_q_d:"dimuonQ = Q1 + Q2; conservar Q = 0",
+ sn_m2:"Masa invariante M² y M", sn_m2_d:"M² = (E1+E2)² − |p1+p2|²; filtrar M² > 0; M = √M²",
+ sn_hist:"Histograma completo (escala log)", sn_hist_d:"plt.hist de dimuonM en 0–120 GeV",
+ sn_z:"Zoom al pico del Z⁰", sn_z_d:"Histograma 75–105 GeV",
+ sn_fit:"Ajuste gaussiana + recta (Z⁰)", sn_fit_d:"scipy.optimize.curve_fit, parámetros y gráfica",
+ sn_jpsi:"Pico del J/ψ", sn_jpsi_d:"Histograma 2.9–3.3 GeV y ajuste",
+ sn_lmfit:"Ajuste con lmfit (si está instalado)", sn_lmfit_d:"GaussianModel + LinearModel como en el notebook",
+ about_title:"Acerca de esta herramienta", btn_start:"Comenzar a explorar →", edu_title:"Panel educativo", btn_close:"Cerrar", edu_toc:"Contenido",
+ layer_beam:"<b>Tubo de haz</b><br>Tubería de vacío por la que circulan los dos haces de protones en direcciones opuestas. Las colisiones ocurren en el centro.",
+ layer_vertex:"<b>Punto de colisión (vértice primario)</b><br>Aquí chocan los protones. Las partículas producidas (p. ej. un Z⁰ o un J/ψ) decaen casi al instante y solo vemos sus productos: los dos muones.",
+ layer_tracker:"<b>Silicon Trackers — tracker de silicio</b><br>Píxeles (100×150 μm, ~1 m², ~66 M canales) y microtiras (~200 m², ~9.6 M canales) que registran los puntos por donde pasan las partículas cargadas. De la curvatura de la trayectoria en el campo magnético se obtiene el momento (p, pT).",
+ layer_preshower:"<b>Preshower</b><br>Capa delgada de tiras de silicio (~16 m², ~137 000 canales) situada delante del ECAL de las tapas. Ayuda a distinguir fotones individuales de pares de fotones muy próximos (decaimientos de π⁰). Los muones lo cruzan sin apenas interactuar.",
+ layer_ecal:"<b>Crystal Electromagnetic Calorimeter (ECAL)</b><br>~76 000 cristales centelleadores de tungstato de plomo (PbWO₄), en barril y tapas, que miden la energía de electrones y fotones. Los muones lo atraviesan casi sin depositar energía.",
+ layer_hcal:"<b>Hadron Calorimeter (HCAL)</b><br>Latón + centelleador plástico (~7 000 canales), en barril y tapas. Mide la energía de hadrones (piones, protones, etc.). Los muones también lo cruzan; casi ninguna otra partícula lo hace.",
+ layer_solenoid:"<b>Superconducting Solenoid (3.8 T)</b><br>Bobina de niobio-titanio que transporta ~18 000 A. El imán que da nombre al CMS: su campo curva las trayectorias de las partículas cargadas y permite medir su momento lineal y el signo de su carga.",
+ layer_yoke:"<b>Steel Return Yoke — yugo de retorno de acero</b><br>~12 500 t de acero (la mayor parte de las 14 000 t del detector), organizadas en ruedas de 12 sectores. Cierra el flujo magnético del solenoide y sirve de soporte y filtro para las cámaras de muones intercaladas en él.",
+ layer_muon:"<b>Muon Chambers — barril</b><br>250 Drift Tubes (DT) + 480 Resistive Plate Chambers (RPC), en cuatro estaciones intercaladas en el yugo de acero. Solo los muones (y los neutrinos, indetectables) llegan hasta aquí: por eso el CMS identifica muones con gran eficiencia.",
+ layer_muon_endcap:"<b>Muon Chambers — tapas (endcaps)</b><br>540 Cathode Strip Chambers (CSC) + 576 Resistive Plate Chambers (RPC), en discos intercalados con los discos del yugo. Detectan los muones emitidos a ángulos pequeños respecto al haz.",
+ layer_muon_out:"<b>Estación externa de muones / yugo de retorno</b><br>Anillo exterior (paneles rojos en el detector real). Cierra el flujo magnético y aloja la última estación de cámaras de muones.",
+ layer_support:"<b>Estructura de soporte</b><br>Vigas y plataformas verdes que sostienen las ruedas del detector en la caverna a 100 m bajo tierra.",
+ layer_endcap:"<b>Discos del yugo de acero (endcaps)</b><br>Discos dodecagonales de acero que cierran el barril por ambos extremos, completan el retorno del flujo magnético y sostienen las cámaras de muones de las tapas (CSC + RPC).",
+ layer_hf:"<b>Forward Calorimeter (HF)</b><br>Acero + fibras de cuarzo (~2 000 canales), situado a ~11 m del punto de colisión. Mide las partículas emitidas casi paralelas al haz, esenciales para reconstruir la energía total del evento.",
+},
+en:{
+ app_title:"Invariant Mass Simulator", app_sub:"CMS Open Data · Dimuons",
+ tab_sim:"Simulator", tab_code:"Pure code (Python)", btn_about:"ⓘ About this tool", btn_edu:"📘 Learning panel",
+ load_title:"Load data (CSV)", drop_text:"Drag & drop the Dimuon_DoubleMu.csv file here or click to browse",
+ file_none:"No file loaded.", file_loading:"Reading and parsing file…", file_ok:"✔ {n} events loaded from {f}. Columns OK.",
+ err_cols:"✖ Missing required columns: {c}. Expected the Dimuon_DoubleMu.csv columns (E1, px1, py1, pz1, Q1, E2, px2, py2, pz2, Q2).",
+ err_parse:"✖ CSV parse error: {e}", err_empty:"✖ The file contains no valid rows.",
+ url_label:"…or load from a URL:", btn_load_url:"Load URL",
+ url_hint:"Note: if you open this file by double-clicking it (file://), or the source server does not allow CORS, loading from a URL may fail due to browser security restrictions. If that happens, download the CSV manually and load it with the button above.",
+ url_empty:"✖ Enter a URL before loading.",
+ url_loading:"Downloading data from the URL…",
+ err_url_http:"✖ The server responded with error {s} when requesting the URL.",
+ err_url_fetch:"✖ Could not load the URL (likely blocked by CORS or by opening the file via file://). Download the CSV manually and load it with the button above. Technical detail: {e}",
+ range_title:"Invariant mass range (GeV)", preset_z:"Z⁰ peak (75–105 GeV)", preset_jpsi:"J/ψ peak (2.9–3.3 GeV)", preset_all:"Full spectrum (0–120 GeV)",
+ lbl_min:"Min", lbl_max:"Max", lbl_bins:"Bins",
+ count_title:"Events to process", opt_all:"All", opt_custom:"Custom…", count_info:"{n} of {t} events will be processed.",
+ play_title:"Playback", btn_play:"▶ Play", btn_pause:"❚❚ Pause", btn_step:"⏭ Step", btn_reset:"↺ Reset", lbl_speed:"Speed", lbl_eps:"events/s",
+ pause_tag:"❚❚ Paused — state frozen (you can orbit the camera)",
+ stats_title:"Live statistics", st_total:"Events processed", st_acc:"Accepted (Q=0, M²>0)", st_rej:"Rejected", st_inrange:"Accepted in range",
+ st_mean:"Mean mass in range (GeV)", st_std:"Std. deviation (GeV)",
+ lg_mu1:"Muon 1", lg_mu2:"Muon 2", lg_vertex:"Collision point", hint3d:"Drag to rotate · wheel to zoom · hover over detector layers · cutaway view: one side is left open",
+ event_title:"Current event", ev_none:"No event", ev_ok:"✔ ACCEPTED (Q = 0, M² > 0)", ev_no_q:"✖ REJECTED (Q ≠ 0)", ev_no_m:"✖ REJECTED (M² ≤ 0)", ev_done:"Playback finished",
+ hist_title:"Invariant mass histogram (live)", lbl_logx:"Log X axis", lbl_logy:"Log Y axis", lbl_showfit:"Show fit",
+ ch_counts:"Events per bin", ch_fit:"Gauss + linear fit", ax_m:"Invariant mass M [GeV]", ax_n:"Number of events",
+ mr_omega_phi:"ω / φ (light mesons)", mr_jpsi:"J/ψ (charmonium)", mr_psi2s:"ψ′ (excited charmonium)", mr_upsilon:"Υ (bottomonium)", mr_z0:"Z⁰ (weak boson)", mr_other:"Continuum / other pairs",
+ mr_note:"Color bands: mass windows for known resonances (PDG reference), added for pedagogical purposes — they do not represent the trigger paths from the CMS reference slide's legend.",
+ fit_title:"Signal + background fit: Gaussian + straight line", fit_mu:"center", fit_sigma:"width", fit_A:"amplitude", fit_b0:"background intercept", fit_b1:"background slope",
+ fit_wait:"Waiting for events in the selected range… (≥ 30 in-range events required)", fit_ok:"Fit converged with {n} in-range events. Δ vs nearest reference: {d} GeV.",
+ fit_bad:"The fit does not converge well (peak outside range or σ too large). Try a narrower range or more events.",
+ ref_masses:"Reference (literature): m(Z⁰) = 91.1876 GeV · m(J/ψ) = 3.0969 GeV. Model: f(M) = a + b·M + A·exp[−(M−μ)²/2σ²]. Errors: Poisson weights 1/max(N,1).",
+ res_title:"What does this result mean? Detector resolution, in plain words",
+ res_p1:"The detector does not measure mass perfectly: every individual measurement carries a small margin of error. That is why the peak is not a vertical line but a bell curve (Gaussian) with a certain width. In practice, that width is the instrument's <b>resolution</b> in this mass region.",
+ res_p2:"Measured width σ = <b>{s} GeV</b>, i.e. <b>{pct} %</b> of the peak centre. This means that a single mass measurement near this peak can typically vary by ±{s} GeV purely because of the instrument's precision, not because the particle really has that mass.",
+ res_p3:"Your fit gives a centre of <b>{mu} GeV</b>; the nearest known literature value is <b>{ref} GeV</b> ({name}). The difference of <b>{d} GeV</b> ({dpct} %) {verdict}",
+ res_within:"fits comfortably within the measurement's margin of error (it is smaller than σ).",
+ res_near:"is of the order of the measurement's margin of error (between 1 and 3 σ): reasonable with this statistics, but consider processing more events or checking the range.",
+ res_far:"is larger than 3 σ: the fitted peak probably does not correspond to this reference (it may be another resonance, e.g. ψ' or ϒ, or a fit dominated by background). Try a preset (Z⁰ or J/ψ).",
+ res_note_z:"Honest note: for the Z⁰ part of the observed width is its natural width (Γ ≈ 2.5 GeV), not only instrumental resolution. This comparison uses σ as a reference scale, not the formal statistical uncertainty of the parameter μ.",
+ res_note_j:"Honest note: for the J/ψ the natural width (≈ 0.09 MeV) is negligible, so σ is practically pure instrumental resolution. This comparison uses σ as a reference scale, not the formal statistical uncertainty of μ.",
+ res_done:"✔ Playback finished: these are the final values with {n} in-range events.",
+ res_live:"Updates live as events arrive ({n} in range so far).",
+ snippets_title:"Snippets from the original notebook", snippets_help:"Click a snippet to copy it into the editor. They mirror the key cells of the notebook (pandas + numpy + matplotlib + scipy).",
+ py_idle:"Python not started. Press \"Start Python\" (~20 MB download the first time).", py_loading:"Downloading Pyodide and packages (numpy, pandas, scipy, matplotlib)…", py_ready:"Python ready. DataFrame `datos` loaded with {n} rows.",
+ py_ready_nodata:"Python ready, but no CSV loaded. Load a file in the Simulator tab and press \"Reload data\".", py_error:"Error starting Pyodide: {e}", py_running:"Running…",
+ btn_init_py:"⚡ Start Python (Pyodide)", btn_run:"▶ Run", btn_reload_data:"↻ Reload `datos`", btn_lmfit:"📦 Install lmfit (optional)", btn_clear:"Clear output", out_title:"Output",
+ editor_hint:"Available variables: <b>datos</b> (DataFrame with the loaded CSV), <b>pd</b>, <b>np</b>, <b>plt</b>. Ctrl+Enter runs.",
+ py_no_data:"No data: load a CSV in the Simulator tab first.", lmfit_try:"Trying to install lmfit with micropip…", lmfit_ok:"lmfit installed. You can now use `from lmfit.models import GaussianModel, LinearModel`.",
+ lmfit_fail:"Could not install lmfit ({e}). Use scipy.optimize.curve_fit (fit snippet), which implements the same model.",
+ sn_explore:"Explore the data", sn_explore_d:"datos.head(), columns, size",
+ sn_q:"Dimuon charge and Q = 0 filter", sn_q_d:"dimuonQ = Q1 + Q2; keep Q = 0",
+ sn_m2:"Invariant mass M² and M", sn_m2_d:"M² = (E1+E2)² − |p1+p2|²; filter M² > 0; M = √M²",
+ sn_hist:"Full histogram (log scale)", sn_hist_d:"plt.hist of dimuonM over 0–120 GeV",
+ sn_z:"Zoom into the Z⁰ peak", sn_z_d:"Histogram 75–105 GeV",
+ sn_fit:"Gaussian + line fit (Z⁰)", sn_fit_d:"scipy.optimize.curve_fit, parameters and plot",
+ sn_jpsi:"J/ψ peak", sn_jpsi_d:"Histogram 2.9–3.3 GeV and fit",
+ sn_lmfit:"Fit with lmfit (if installed)", sn_lmfit_d:"GaussianModel + LinearModel as in the notebook",
+ about_title:"About this tool", btn_start:"Start exploring →", edu_title:"Learning panel", btn_close:"Close", edu_toc:"Contents",
+ layer_beam:"<b>Beam pipe</b><br>Vacuum pipe where the two proton beams circulate in opposite directions. Collisions happen at the centre.",
+ layer_vertex:"<b>Collision point (primary vertex)</b><br>Protons collide here. The particles produced (e.g. a Z⁰ or a J/ψ) decay almost instantly and we only see their products: the two muons.",
+ layer_tracker:"<b>Silicon Trackers</b><br>Pixels (100×150 μm, ~1 m², ~66M channels) and microstrips (~200 m², ~9.6M channels) recording the points crossed by charged particles. The curvature of the track in the magnetic field gives the momentum (p, pT).",
+ layer_preshower:"<b>Preshower</b><br>Thin layer of silicon strips (~16 m², ~137,000 channels) placed in front of the endcap ECAL. It helps to tell single photons from very close photon pairs (π⁰ decays). Muons cross it with almost no interaction.",
+ layer_ecal:"<b>Crystal Electromagnetic Calorimeter (ECAL)</b><br>~76,000 scintillating lead-tungstate (PbWO₄) crystals, in barrel and endcaps, measuring the energy of electrons and photons. Muons pass through depositing almost no energy.",
+ layer_hcal:"<b>Hadron Calorimeter (HCAL)</b><br>Brass + plastic scintillator (~7,000 channels), in barrel and endcaps. Measures the energy of hadrons (pions, protons…). Muons also cross it; almost nothing else does.",
+ layer_solenoid:"<b>Superconducting Solenoid (3.8 T)</b><br>Niobium-titanium coil carrying ~18,000 A. The magnet that gives CMS its name: its field bends charged-particle tracks, allowing the measurement of momentum and the sign of the charge.",
+ layer_yoke:"<b>Steel Return Yoke</b><br>~12,500 tonnes of steel (most of the detector's 14,000 t), arranged in wheels of 12 sectors. It closes the magnetic flux of the solenoid and acts as support and filter for the muon chambers interleaved in it.",
+ layer_muon:"<b>Muon Chambers — barrel</b><br>250 Drift Tubes (DT) + 480 Resistive Plate Chambers (RPC), in four stations interleaved with the steel yoke. Only muons (and undetectable neutrinos) reach them: this is why CMS identifies muons so efficiently.",
+ layer_muon_endcap:"<b>Muon Chambers — endcaps</b><br>540 Cathode Strip Chambers (CSC) + 576 Resistive Plate Chambers (RPC), in discs interleaved with the yoke discs. They detect muons emitted at small angles to the beam.",
+ layer_muon_out:"<b>Outer muon station / return yoke</b><br>Outer ring (red panels in the real detector). Closes the magnetic flux and hosts the last muon-chamber station.",
+ layer_support:"<b>Support structure</b><br>Green beams and platforms holding the detector wheels in the cavern 100 m underground.",
+ layer_endcap:"<b>Steel yoke discs (endcaps)</b><br>Dodecagonal steel discs closing the barrel at both ends; they complete the magnetic flux return and hold the endcap muon chambers (CSC + RPC).",
+ layer_hf:"<b>Forward Calorimeter (HF)</b><br>Steel + quartz fibres (~2,000 channels), located ~11 m from the collision point. It measures particles emitted almost parallel to the beam, essential to reconstruct the total energy of the event.",
+}};
+
+/* ---- Contenido HTML largo (Acerca de / Educativo), bilingüe ---- */
+const ABOUT = {
+es:`
+<h3>¿Qué es esta herramienta?</h3>
+<p>Un <b>simulador visual e interactivo de reconstrucción de masa invariante</b> de eventos <i>dimuón</i> (dos muones por evento) medidos por el experimento CMS del CERN. Reproduce, evento a evento y en tu navegador, el mismo pipeline de análisis de un notebook académico: cálculo de la carga total del par, filtro de candidatos neutros, cálculo de <i>M²</i> y <i>M</i>, histograma acumulado y ajuste señal + fondo. Todo ello sincronizado con una representación 3D esquemática del detector.</p>
+<h3>¿Con base en qué se construyó?</h3>
+<p>A partir del notebook educativo <b>"MasaInvariante — análisis de datos del CMS utilizando ROOT y Python"</b>, reimplementando fielmente su lógica de cálculo (pandas + numpy) en JavaScript para la visualización en vivo, y ofreciendo además una pestaña de <b>Código puro</b> donde el mismo código Python se ejecuta realmente (Pyodide) sobre el archivo cargado. Los textos siguientes son el contenido original del notebook.</p>
+
+<h3>El CERN</h3>
+<div class="quote"><p>La Organización Europea para la Investigación Nuclear (CERN) es el mayor centro de investigación de física fundamental del mundo. Es una organización internacional ubicada en la frontera entre Francia y Suiza, en la que participan miles de investigadores y estudiantes de diferentes países e instituciones en el mundo. Cuenta con el más poderoso acelerador de partículas, el Gran Colisionador de Hadrones (LHC): un acelerador circular de 27 km de circunferencia, a 100 m bajo tierra, capaz de acelerar haces de protones en direcciones contrarias, con hasta 7 TeV de energía cada uno. Posee 4 experimentos principales (ALICE, ATLAS, LHCb y CMS), donde los haces de protones se hacen chocar y la colisión genera una gran cantidad de partículas. Muchas de esas partículas desaparecen casi inmediatamente creando partículas más ligeras, por lo que no son detectadas directamente: solo se infiere su existencia a partir de las partículas finales.</p></div>
+
+<h3>El experimento CMS</h3>
+<div class="quote"><p>El Experimento CMS, o el Solenoide de Muones Compacto, es un experimento que trata de estudiar toda la física posible en este tipo de colisiones. Su potente solenoide (magneto) permite curvar la trayectoria de partículas cargadas para determinar su momento lineal. Aunque el experimento no puede reconocer directamente todos los tipos de partículas, sí está diseñado para que solo los muones (y neutrinos, que en la práctica son indetectables) sean detectados en los sistemas de detectores más externos, por lo que es posible reconocer muones.</p></div>
+
+<h3>Masa invariante</h3>
+<div class="quote"><p>Una forma simple de inferir la existencia de una partícula a partir de las partículas finales es considerar la relación relativista entre el momento y la energía (ver ecuaciones en el Panel educativo). Ya que la energía y el momento se conservan, el cuatro-momento se conserva: el cuatro-momento de una partícula madre que decae para generar varias partículas hijas más ligeras es igual a la suma de los cuatro-momentos de las partículas finales.</p></div>
+
+<h3>Reconstrucción de partículas decayendo a dos muones</h3>
+<div class="quote"><p>La colaboración CMS, a través del programa CMS Open Data, ha puesto a disposición muestras de datos de colisiones reales a investigadores, estudiantes y al público en general para promover la investigación científica, la educación en física de partículas y facilitar la innovación. Esta herramienta analiza un conjunto de datos simplificado para entrenamiento en análisis, tomando como base el código de Python ya desarrollado y validado en el notebook académico original ("MasaInvariante — análisis de datos del CMS utilizando ROOT y Python"), del cual esta aplicación es una reinterpretación visual e interactiva.</p></div>
+
+<div class="added">
+<div class="added-tag">Contexto añadido por esta herramienta — no es una cita del notebook original</div>
+<h3>Cómo nació esta herramienta</h3>
+<p>El análisis que ves aquí existía originalmente como un notebook académico: celdas de código en Python (pandas, numpy, matplotlib, lmfit) que leen el CSV, filtran, calculan y grafican. Ese formato es excelente para trabajar, pero el proceso se percibe solo como código y tablas estáticas. Esta herramienta es la <b>reinterpretación visual e interactiva</b> de ese mismo notebook: cada paso del pipeline (Q = Q₁+Q₂ → filtro Q = 0 → M² → filtro M² &gt; 0 → M = √M² → histograma → ajuste) se ejecuta evento a evento, sincronizado con una vista 3D del detector y con un histograma y un ajuste que se actualizan en tiempo real. La lógica de cálculo es exactamente la misma; lo que cambia es que ahora se puede <i>ver y manipular</i>.</p>
+<h3>¿Qué es un muon?</h3>
+<p>Un muon (μ) es una partícula elemental de la familia de los <b>leptones</b>, la "prima pesada" del electrón: tiene la misma carga eléctrica (−1; +1 para su antipartícula μ⁺) pero unas <b>207 veces más masa</b> (≈105.7 MeV frente a ≈0.511 MeV). Es inestable —su vida media en reposo es de ≈2.2 microsegundos—, pero como sale de la colisión a velocidades relativistas, la dilatación del tiempo le permite recorrer muchos metros y atravesar todo el detector antes de desintegrarse. Su rasgo clave es que <b>atraviesa la materia con mucha más facilidad que casi cualquier otra partícula cargada</b>: no siente la fuerza fuerte (así que los calorímetros hadrónicos no lo frenan) y, al ser tan masivo comparado con un electrón, irradia poquísima energía por <i>bremsstrahlung</i> (radiación de frenado). El resultado es que el muon es prácticamente la única partícula cargada que llega hasta las cámaras de muones, la capa más externa del CMS.</p>
+<h3>¿Por qué precisamente dimuones para "reconstruir" partículas?</h3>
+<p>Partículas como el Z⁰ o el J/ψ viven una fracción ínfima de segundo (el Z⁰, del orden de 10⁻²⁵ s) y se desintegran antes de recorrer una distancia medible: ningún detector las "ve" directamente. Lo único que se mide son sus productos de decaimiento; cuando esos productos son dos muones se obtienen dos partículas limpias, bien identificadas y con energía y momento medidos con precisión. La <b>conservación del cuadri-momento</b> hace el resto: la energía total y el momento total de las dos hijas son los de la madre, y su masa se recupera con M² = (E₁+E₂)² − |p⃗₁+p⃗₂|². Ese es, literalmente, el cálculo que hace esta herramienta para cada evento.</p>
+<h3>El panorama completo: el espectro real de dimuones de CMS (2011)</h3>
+<p>Como referencia de contexto se tomó una diapositiva real de una charla de la colaboración: <i>"Triggering on di-muons at 10³²–10³³ with CMS"</i>, G. Tonelli (CERN/INFN/UNIPI), HEP 2011, Grenoble, 25 de julio de 2011. Muestra el espectro de masa invariante de dimuones registrado por CMS en la toma de datos de 2011 (√s = 7 TeV, L = 1.1 fb⁻¹, eventos por 10 MeV, ambos ejes logarítmicos). Cubre casi tres órdenes de magnitud en masa —desde menos de 1 GeV hasta más allá del pico del Z⁰ cerca de 91 GeV— y sobre un fondo continuo se distinguen como "bultos" las resonancias: los mesones ligeros <b>ω</b> y <b>φ</b>, el <b>J/ψ</b> y su estado excitado <b>ψ'</b>, el <b>B<sub>s</sub></b> (a través de su raro decaimiento a dos muones), la familia <b>ϒ</b> (Upsilon, estados ligados de quarks bottom) y finalmente el <b>Z⁰</b>. Los colores de la figura corresponden a distintas <i>rutas de disparo</i> (trigger paths): el sistema que decide en tiempo real qué colisiones se guardan usó umbrales distintos ("low p<sub>T</sub>" y "high p<sub>T</sub> double muon", más rutas dedicadas a J/ψ, ψ', B<sub>s</sub>→μ⁺μ⁻ y ϒ) para cubrir cada región del espectro.</p>
+<p><b>Relación con esta herramienta:</b> lo que haces aquí es exactamente el mismo procedimiento —sumar los cuadri-momentos de dos muones y histogramar la masa— aplicado a un dataset educativo real de CMS Open Data, a menor escala y con fines didácticos. Cada pico que ves aparecer en el histograma en vivo es un caso particular de lo que esa diapositiva muestra completo. <b>Precisión importante:</b> el dataset de esta herramienta (record 5201) contiene principalmente los picos del <b>Z⁰</b> y del <b>J/ψ</b>, además de otras resonancias menores por debajo de 25 GeV; no reproduce todas las resonancias de la figura (ω, φ, B<sub>s</sub>…). La figura es contexto y referencia del panorama completo, no una descripción exacta del archivo que cargas.</p>
+</div>
+
+<div class="added">
+<div class="added-tag">Propósito y finalidad — motivación pedagógica añadida por esta herramienta</div>
+<h3>Datos abiertos en ciencia</h3>
+<p>CMS Open Data permite que cualquier persona —no solo físicos del CERN— pueda tocar datos reales de colisiones del LHC: reproducir análisis, aprender el método científico con datos reales en lugar de simulados y verificar de forma independiente resultados publicados. Forma parte de un movimiento más amplio de <b>ciencia abierta</b>, en el que la transparencia y la reproducibilidad son parte del propio resultado científico.</p>
+<h3>Para qué se usan estos datos</h3>
+<ul>
+<li><b>Educación</b> (esta herramienta): ver cómo emerge la masa de una partícula a partir de medidas de sus productos.</li>
+<li><b>Formación</b> de la próxima generación de físicos de partículas, con los mismos formatos y herramientas del análisis real.</li>
+<li><b>Desarrollo y prueba</b> de nuevas técnicas de análisis sin necesitar acceso directo al detector.</li>
+<li><b>Búsquedas independientes</b> de nueva física por parte de la comunidad, fuera de la colaboración.</li>
+</ul>
+<h3>Por qué importa entender el muon y esta lógica de reconstrucción</h3>
+<p>El método que practicas aquí —sumar cuadri-momentos de partículas detectadas y buscar un bulto de resonancia sobre un fondo continuo en un histograma de masa invariante— no es un ejercicio de juguete: es exactamente el que se usó para descubrir el <b>J/ψ</b> (noviembre de 1974, de forma independiente en dos laboratorios distintos: la llamada "Revolución de noviembre") y el <b>Z⁰</b> (CERN, 1983, en pares de leptones), y fue una de las técnicas centrales del descubrimiento del <b>bosón de Higgs</b> en 2012, en particular en el canal a cuatro leptones, buscando precisamente este tipo de bulto. Y no se limita a partículas ya conocidas: cualquier partícula nueva y suficientemente masiva que decaiga a un par de leptones (o de fotones, u otras combinaciones) dejaría la misma firma —un bulto inesperado donde antes solo había fondo liso—. Por eso esta misma lógica sigue siendo hoy una de las herramientas de búsqueda de física más allá del Modelo Estándar.</p>
+</div>
+
+<h3>¿Para qué sirve?</h3>
+<ul>
+<li><b>Académico y estudiantil:</b> ver de forma didáctica y dinámica cómo, a partir de energía y momento de dos muones, "aparece" la masa de una partícula que nunca se detectó directamente (Z⁰ ≈ 91 GeV, J/ψ ≈ 3.1 GeV).</li>
+<li><b>Investigación / entrenamiento:</b> explorar el efecto del número de eventos, del binado y del rango sobre el histograma y el ajuste señal + fondo, y ejecutar el análisis real en Python sobre los mismos datos.</li>
+</ul>
+<h3>Cómo empezar</h3>
+<ul>
+<li>Carga <span class="kbd">Dimuon_DoubleMu.csv</span>: arrástralo/súbelo en el panel <b>1. Cargar datos</b>, o usa el campo "…o cargar desde una URL" (ya trae prellenado un espejo en GitHub del mismo dataset de CMS Open Data, record 5201).</li>
+<li>Elige el rango (presets Z⁰ / J/ψ / todo el espectro), la cantidad de eventos y pulsa <b>Play</b>. El primer evento del dataset debe dar <b>M ≈ 17.49 GeV</b>.</li>
+<li>Pasa el mouse sobre las capas del detector 3D para leer qué representa cada una. Usa <b>Pausa</b> para congelar un evento y orbitar la cámara a su alrededor.</li>
+</ul>
+<div class="credit"><b>Créditos de datos:</b> CMS Open Data (CERN), record 5201, "Dimuon_DoubleMu.csv" — muestras de colisiones reales publicadas por la Colaboración CMS bajo el programa CMS Open Data. El botón de carga por URL usa por defecto un espejo idéntico de este mismo archivo, publicado por el repositorio educativo oficial <span class="kbd">cms-opendata-education</span> en GitHub. <b>Fuente metodológica:</b> notebook "MasaInvariante — análisis de datos del CMS utilizando ROOT y Python". <b>Referencia de contexto:</b> diapositiva "Triggering on di-muons at 10³²–10³³ with CMS", G. Tonelli (CERN/INFN/UNIPI), HEP 2011 Grenoble — usada solo como referencia descriptiva; la imagen no se incluye en este archivo. Esta herramienta es una reinterpretación visual e interactiva con fines educativos, no un producto oficial del CERN.</div>
+`,
+en:`
+<h3>What is this tool?</h3>
+<p>A <b>visual, interactive invariant-mass reconstruction simulator</b> for <i>dimuon</i> events (two muons per event) recorded by the CMS experiment at CERN. It reproduces, event by event and in your browser, the exact analysis pipeline of an academic notebook: total charge of the pair, neutral-candidate filter, computation of <i>M²</i> and <i>M</i>, accumulated histogram and signal + background fit — all synchronised with a schematic 3D view of the detector.</p>
+<h3>What was it built from?</h3>
+<p>From the educational notebook <b>"MasaInvariante — CMS data analysis using ROOT and Python"</b>, faithfully re-implementing its computation logic (pandas + numpy) in JavaScript for the live visualisation, and adding a <b>Pure code</b> tab where the same Python code actually runs (Pyodide) on the loaded file. The following texts are the original notebook content (translated).</p>
+
+<h3>CERN</h3>
+<div class="quote"><p>The European Organization for Nuclear Research (CERN) is the largest fundamental-physics research centre in the world. It is an international organisation located on the French–Swiss border, involving thousands of researchers and students from many countries and institutions. It hosts the most powerful particle accelerator, the Large Hadron Collider (LHC): a circular accelerator 27 km in circumference, 100 m underground, able to accelerate proton beams in opposite directions with up to 7 TeV of energy each. It has 4 main experiments (ALICE, ATLAS, LHCb and CMS), where the proton beams are made to collide and the collision produces a large number of particles. Many of those particles disappear almost immediately, creating lighter particles, so they are not detected directly: their existence is only inferred from the final particles.</p></div>
+
+<h3>The CMS experiment</h3>
+<div class="quote"><p>The CMS Experiment, or Compact Muon Solenoid, is an experiment that aims to study all the physics possible in this kind of collision. Its powerful solenoid (magnet) bends the trajectories of charged particles so that their linear momentum can be determined. Although the experiment cannot directly recognise every type of particle, it is designed so that only muons (and neutrinos, which are undetectable in practice) reach the outermost detector systems, making it possible to identify muons.</p></div>
+
+<h3>Invariant mass</h3>
+<div class="quote"><p>A simple way to infer the existence of a particle from the final particles is to consider the relativistic relation between momentum and energy (see the equations in the Learning panel). Since energy and momentum are conserved, the four-momentum is conserved: the four-momentum of a mother particle that decays into several lighter daughter particles equals the sum of the four-momenta of the final particles.</p></div>
+
+<h3>Reconstruction of particles decaying into two muons</h3>
+<div class="quote"><p>The CMS Collaboration, through the CMS Open Data programme, has made samples of real collision data available to researchers, students and the general public to promote scientific research, particle-physics education and innovation. This tool analyses a simplified dataset for analysis training, based on the Python code already developed and validated in the original academic notebook ("MasaInvariante — CMS data analysis using ROOT and Python"), of which this application is a visual and interactive reinterpretation.</p></div>
+
+<div class="added">
+<div class="added-tag">Context added by this tool — not a quotation from the original notebook</div>
+<h3>How this tool was born</h3>
+<p>The analysis you see here originally existed as an academic notebook: Python code cells (pandas, numpy, matplotlib, lmfit) that read the CSV, filter, compute and plot. That format is excellent for working, but the process is perceived only as code and static tables. This tool is the <b>visual and interactive reinterpretation</b> of that same notebook: every step of the pipeline (Q = Q₁+Q₂ → Q = 0 filter → M² → M² &gt; 0 filter → M = √M² → histogram → fit) runs event by event, synchronised with a 3D view of the detector and with a histogram and a fit that update in real time. The computation logic is exactly the same; what changes is that it can now be <i>seen and manipulated</i>.</p>
+<h3>What is a muon?</h3>
+<p>A muon (μ) is an elementary particle of the <b>lepton</b> family, the "heavy cousin" of the electron: it has the same electric charge (−1; +1 for its antiparticle μ⁺) but about <b>207 times more mass</b> (≈105.7 MeV versus ≈0.511 MeV). It is unstable — its lifetime at rest is ≈2.2 microseconds — but since it leaves the collision at relativistic speeds, time dilation lets it travel many metres and cross the whole detector before decaying. Its key trait is that it <b>passes through matter far more easily than almost any other charged particle</b>: it does not feel the strong force (so the hadron calorimeters do not stop it) and, being so massive compared to an electron, it radiates very little energy through <i>bremsstrahlung</i> (braking radiation). As a result the muon is practically the only charged particle that reaches the muon chambers, the outermost layer of CMS.</p>
+<h3>Why dimuons, precisely, to "reconstruct" particles?</h3>
+<p>Particles such as the Z⁰ or the J/ψ live a tiny fraction of a second (the Z⁰, of order 10⁻²⁵ s) and decay before travelling any measurable distance: no detector "sees" them directly. All that can be measured are their decay products; when those products are two muons you get two clean, well-identified particles with precisely measured energy and momentum. <b>Four-momentum conservation</b> does the rest: the total energy and total momentum of the two daughters are those of the mother, and its mass is recovered with M² = (E₁+E₂)² − |p⃗₁+p⃗₂|². That is, literally, the computation this tool performs for every event.</p>
+<h3>The big picture: the real CMS dimuon spectrum (2011)</h3>
+<p>As context reference we used a real slide from a collaboration talk: <i>"Triggering on di-muons at 10³²–10³³ with CMS"</i>, G. Tonelli (CERN/INFN/UNIPI), HEP 2011, Grenoble, 25 July 2011. It shows the dimuon invariant-mass spectrum recorded by CMS in the 2011 run (√s = 7 TeV, L = 1.1 fb⁻¹, events per 10 MeV, both axes logarithmic). It spans almost three orders of magnitude in mass — from below 1 GeV to beyond the Z⁰ peak near 91 GeV — and, on top of a continuous background, resonances stand out as "bumps": the light mesons <b>ω</b> and <b>φ</b>, the <b>J/ψ</b> and its excited state <b>ψ'</b>, the <b>B<sub>s</sub></b> (through its rare decay into two muons), the <b>ϒ</b> family (Upsilon, bound states of bottom quarks) and finally the <b>Z⁰</b>. The colours in the figure correspond to different <i>trigger paths</i>: the system that decides in real time which collisions are recorded used different thresholds ("low p<sub>T</sub>" and "high p<sub>T</sub> double muon", plus dedicated paths for J/ψ, ψ', B<sub>s</sub>→μ⁺μ⁻ and ϒ) to cover each region of the spectrum.</p>
+<p><b>Relation to this tool:</b> what you do here is exactly the same procedure — add the four-momenta of two muons and histogram the mass — applied to a real educational CMS Open Data dataset, at smaller scale and for didactic purposes. Every peak you see appear in the live histogram is a particular case of what that slide shows in full. <b>Important precision:</b> the dataset of this tool (record 5201) mainly contains the <b>Z⁰</b> and <b>J/ψ</b> peaks, plus other minor resonances below 25 GeV; it does not reproduce all the resonances of the figure (ω, φ, B<sub>s</sub>…). The figure is context and reference for the full landscape, not an exact description of the file you load.</p>
+</div>
+
+<div class="added">
+<div class="added-tag">Purpose and aim — pedagogical motivation added by this tool</div>
+<h3>Open data in science</h3>
+<p>CMS Open Data lets anyone — not only CERN physicists — touch real LHC collision data: reproduce analyses, learn the scientific method with real rather than simulated data, and independently verify published results. It is part of a wider <b>open science</b> movement, in which transparency and reproducibility are part of the scientific result itself.</p>
+<h3>What these data are used for</h3>
+<ul>
+<li><b>Education</b> (this tool): seeing how a particle's mass emerges from measurements of its products.</li>
+<li><b>Training</b> the next generation of particle physicists, with the same formats and tools used in real analyses.</li>
+<li><b>Developing and testing</b> new analysis techniques without direct access to the detector.</li>
+<li><b>Independent searches</b> for new physics by the wider community, outside the collaboration.</li>
+</ul>
+<h3>Why understanding the muon and this reconstruction logic matters</h3>
+<p>The method you practise here — adding four-momenta of detected particles and looking for a resonance bump on a smooth background in an invariant-mass histogram — is no toy exercise: it is exactly the one used to discover the <b>J/ψ</b> (November 1974, independently at two different laboratories: the so-called "November Revolution") and the <b>Z⁰</b> (CERN, 1983, in lepton pairs), and it was one of the central techniques of the <b>Higgs boson</b> discovery in 2012, in particular in the four-lepton channel, searching for precisely this kind of bump. Nor is it limited to known particles: any new, sufficiently massive particle decaying into a pair of leptons (or photons, or other combinations) would leave the same signature — an unexpected bump where before there was only smooth background. That is why this very logic remains, today, one of the main tools in the search for physics beyond the Standard Model.</p>
+</div>
+
+<h3>What is it for?</h3>
+<ul>
+<li><b>Academic and student use:</b> see, didactically and dynamically, how the mass of a particle that was never directly detected (Z⁰ ≈ 91 GeV, J/ψ ≈ 3.1 GeV) "emerges" from the energy and momentum of two muons.</li>
+<li><b>Research / training:</b> explore the effect of the number of events, binning and range on the histogram and on the signal + background fit, and run the real Python analysis on the same data.</li>
+</ul>
+<h3>Getting started</h3>
+<ul>
+<li>Load <span class="kbd">Dimuon_DoubleMu.csv</span>: drag/upload it in panel <b>1. Load data</b>, or use the "…or load from a URL" field (already prefilled with a GitHub mirror of the same CMS Open Data record 5201 dataset).</li>
+<li>Choose the range (Z⁰ / J/ψ / full-spectrum presets), the number of events and press <b>Play</b>. The first event of the dataset should give <b>M ≈ 17.49 GeV</b>.</li>
+<li>Hover over the 3D detector layers to read what each one represents. Use <b>Pause</b> to freeze an event and orbit the camera around it.</li>
+</ul>
+<div class="credit"><b>Data credits:</b> CMS Open Data (CERN), record 5201, "Dimuon_DoubleMu.csv" — real collision samples released by the CMS Collaboration under the CMS Open Data programme. The "load from URL" button defaults to an identical mirror of this same file, published by the official <span class="kbd">cms-opendata-education</span> educational repository on GitHub. <b>Methodological source:</b> notebook "MasaInvariante — CMS data analysis using ROOT and Python". <b>Context reference:</b> slide "Triggering on di-muons at 10³²–10³³ with CMS", G. Tonelli (CERN/INFN/UNIPI), HEP 2011 Grenoble — used only as a descriptive reference; the image is not included in this file. This tool is a visual, interactive reinterpretation for educational purposes, not an official CERN product.</div>
+`};
+
+const EDU = {
+es:`
+<div class="edudoc">
+<nav class="edunav" aria-label="Contenido"></nav>
+<div class="educontent">
+<div class="edu-hero">
+  <div class="edu-kicker">Documento de apoyo · CMS Open Data · Dimuones</div>
+  <h1 class="edu-title">Reconstrucción de masa invariante con dos muones</h1>
+  <p class="edu-sub">De la energía y el momento de dos muones a la masa de una partícula que nunca se detectó directamente: las ecuaciones, el pipeline, el modelo de ajuste, el detector y las preguntas que conviene hacerse.</p>
+</div>
+
+<section class="edusec" id="sec-eq" data-title="1. Ecuaciones fundamentales">
+<h2><span class="num">1</span>Ecuaciones fundamentales</h2>
+<p>Relación relativista entre energía y momento:</p>
+<div class="eq" data-tex="E^2 = m^2 c^4 + P^2 c^2"></div>
+<p>Cuatro-momento de una partícula:</p>
+<div class="eq" data-tex="P^{\\mu} = \\left(\\tfrac{E}{c},\\, P_x,\\, P_y,\\, P_z\\right)"></div>
+<p>Masa invariante al cuadrado (norma del cuatro-vector):</p>
+<div class="eq" data-tex="m^2 c^2 = \\left(\\tfrac{E}{c}\\right)^2 - P^2"></div>
+<p>Conservación del cuatro-momento en el decaimiento madre → dos hijas:</p>
+<div class="eq" data-tex="P^{\\mu} = P^{\\mu}_1 + P^{\\mu}_2"></div>
+<p>Masa invariante de la partícula madre reconstruida a partir de los dos muones:</p>
+<div class="eq" data-tex="M = \\frac{1}{c^2}\\sqrt{(E_1+E_2)^2 - (p_{x1}+p_{x2})^2 - (p_{y1}+p_{y2})^2 - (p_{z1}+p_{z2})^2}"></div>
+<p>En el dataset se usan unidades naturales (<i>c</i> = 1): energías en GeV y momentos en GeV/c.</p>
+</section>
+
+<section class="edusec" id="sec-pipe" data-title="2. Pipeline de análisis">
+<h2><span class="num">2</span>Pipeline de análisis (reproducido por la herramienta)</h2>
+<div class="eq" data-tex="Q = Q_1 + Q_2 \\quad\\Rightarrow\\quad \\text{conservar } Q = 0"></div>
+<div class="eq" data-tex="M^2 = (E_1+E_2)^2 - (p_{x1}+p_{x2})^2 - (p_{y1}+p_{y2})^2 - (p_{z1}+p_{z2})^2 \\quad\\Rightarrow\\quad \\text{conservar } M^2 > 0"></div>
+<div class="eq" data-tex="M = \\sqrt{M^2}"></div>
+<p>Al histogramar <i>M</i> sobre muchos eventos aparecen picos de resonancia: uno amplio cerca de 91 GeV (bosón Z⁰, referencia 91.1876 GeV) y otro estrecho cerca de 3.1 GeV (mesón J/ψ, referencia ≈ 3.0969 GeV), además de otras resonancias menores por debajo de 25 GeV (ψ', Υ(1S,2S,3S), etc.).</p>
+<div class="callout"><div class="ct">Verificación</div>El primer evento del dataset real (record 5201) debe dar M ≈ 17.4922 GeV con este pipeline. Es la comprobación rápida de que los datos cargados y el cálculo son correctos.</div>
+</section>
+
+<section class="edusec" id="sec-fit" data-title="3. Modelo de ajuste">
+<h2><span class="num">3</span>Modelo de ajuste: señal + ruido combinatorio</h2>
+<p>El histograma real es una mezcla de <b>señal</b> (gaussiana alrededor del pico) y <b>fondo combinatorio</b> (pares de muones que no provienen de la misma partícula, modelado como una recta decreciente). Por eso el ajuste correcto es <i>fondo lineal + gaussiana</i>, no una gaussiana pura:</p>
+<div class="eq" data-tex="f(M) = \\underbrace{a + b\\,M}_{\\text{fondo}} + \\underbrace{A\\, e^{-\\frac{(M-\\mu)^2}{2\\sigma^2}}}_{\\text{señal}}"></div>
+<p>En el notebook original el ajuste se realiza con <code>lmfit</code> (GaussianModel + LinearModel). Aquí, el ajuste en vivo usa mínimos cuadrados no lineales (Levenberg–Marquardt) en JavaScript y, en la pestaña Python, <code>scipy.optimize.curve_fit</code> con el mismo modelo.</p>
+<h3>Cómo leer los parámetros</h3>
+<ul>
+<li><b>μ</b> — centro del pico: la masa reconstruida de la partícula madre.</li>
+<li><b>σ</b> — anchura del pico: en la práctica, la resolución con que el detector mide la masa en esa región (ver sección 4).</li>
+<li><b>A</b> — altura del pico sobre el fondo; crece con el número de eventos.</li>
+<li><b>a, b</b> — la recta del fondo combinatorio.</li>
+<li><b>χ²/ndf</b> — calidad del ajuste; valores cercanos a 1 indican que el modelo describe bien las fluctuaciones estadísticas.</li>
+</ul>
+</section>
+
+<section class="edusec" id="sec-gauss" data-title="4. ¿Por qué una gaussiana?">
+<h2><span class="num">4</span>¿Por qué una gaussiana para el pico?</h2>
+<p class="lead">La forma "natural" de una resonancia no es una gaussiana. Lo es, aproximadamente, la forma que el detector observa.</p>
+<p>Físicamente, una resonancia real como el Z⁰ o el J/ψ no tiene una masa exacta: por su vida media finita τ, su distribución de masa tiene la forma de <b>Breit–Wigner</b>, cuya anchura natural Γ está ligada a esa vida media (Γ = ħ/τ). Para el Z⁰, Γ ≈ 2.5 GeV; para el J/ψ, Γ ≈ 0.09 MeV, unas 30 000 veces menor.</p>
+<div class="eq" data-tex="BW(M) \\;\\propto\\; \\frac{1}{(M^2 - M_0^2)^2 + M_0^2\\,\\Gamma^2}"></div>
+<p>Pero lo que el detector observa no es esa forma pura, sino esa forma <b>"emborronada" por la resolución finita del instrumento</b>: cada medida de energía y de momento de los muones lleva un pequeño error, y ese error se propaga a M. La forma observada es la convolución de la forma natural con la función de respuesta del detector.</p>
+<p>Cuando la resolución experimental es mucho mayor que la anchura natural —claramente el caso del J/ψ— la forma observada está dominada por el error de medición. Ese error es la suma de muchas pequeñas contribuciones independientes (posición de los impactos en el tracker, alineación, mapa del campo magnético, pérdida de energía en el material…), y por el <b>teorema del límite central</b> su distribución tiende a ser gaussiana. Por eso una gaussiana es una aproximación razonable y estándar para el pico observado. En el Z⁰, resolución y Γ son comparables, así que la σ del ajuste mezcla ambas cosas: la gaussiana funciona como descripción efectiva del pico.</p>
+<div class="callout gold"><div class="ct">La versión más rigurosa</div>Un análisis más riguroso ajustaría la convolución Breit–Wigner ⊗ Gaussiana (perfil de <b>Voigt</b>), que separa la anchura natural Γ de la resolución σ. Aquí se simplifica a una gaussiana por claridad didáctica, tal como hace el notebook original.</div>
+<div class="callout green"><div class="ct">Conexión con la app</div>Bajo el ajuste, el recuadro "¿Qué significa este resultado?" traduce σ a lenguaje llano: cuánto puede variar una medición individual de masa solo por la precisión del instrumento, y si la diferencia entre μ y el valor de referencia cabe dentro de ese margen.</div>
+</section>
+
+<section class="edusec" id="sec-cms" data-title="5. Por qué CMS detecta bien muones">
+<h2><span class="num">5</span>¿Por qué CMS es tan bueno detectando muones?</h2>
+<p class="lead">CMS significa, literalmente, <b>Compact Muon Solenoid</b>: el detector está diseñado alrededor de esta capacidad.</p>
+<h3>a) Solo los muones atraviesan todas las capas internas</h3>
+<p>Electrones y fotones depositan toda su energía en el calorímetro electromagnético; quarks y gluones se convierten en chorros de hadrones que quedan absorbidos en el calorímetro hadrónico. El muon, en cambio, no siente la fuerza fuerte y, por su gran masa comparada con la del electrón, pierde muy poca energía por radiación de frenado; su pérdida por ionización es pequeña y constante. Así atraviesa tracker, ECAL y HCAL sin ser absorbido.</p>
+<h3>b) Por eso las cámaras de muones están en la capa más externa</h3>
+<p>Las cámaras de muones se colocan fuera de todo lo demás, incluso fuera del imán solenoide, intercaladas en el yugo de hierro. Si algo cargado llega hasta ahí, con altísima probabilidad es un muon. Es un "filtro natural": el propio detector aísla los muones por eliminación.</p>
+<h3>c) Un solenoide de 3.8 T: dos medidas independientes del momento</h3>
+<p>El solenoide superconductor de CMS genera ≈3.8 T, uno de los campos magnéticos más intensos usados en un detector de este tipo. Curva la trayectoria de las partículas cargadas dentro del tracker y, a través del campo de retorno en el yugo, también en las propias cámaras de muones. Eso permite medir el momento con buena precisión en dos zonas independientes —dentro y fuera del imán— y combinar ambas medidas para confirmar y mejorar el resultado.</p>
+<h3>d) Aislamiento + doble medida = excelente resolución en dimuones</h3>
+<p>La combinación de un canal limpio (casi solo llegan muones) con una medida precisa del momento en dos regiones es lo que da a CMS su excelente resolución en el canal de dimuones. Por ese motivo el descubrimiento del Higgs y muchas otras búsquedas se apoyan en canales con muones.</p>
+<div class="callout red"><div class="ct">Dato del notebook</div>El notebook original lo resume así: el experimento "está diseñado para que solo los muones (y neutrinos, que en la práctica son indetectables) sean detectados en los sistemas de detectores más externos, por lo que es posible reconocer muones".</div>
+</section>
+
+<section class="edusec" id="sec-layers" data-title="6. Capas del detector (3D)">
+<h2><span class="num">6</span>Leyenda de las capas del detector (vista 3D)</h2>
+<p>Pasa el mouse sobre cada capa en la vista 3D para leer su descripción. Este es el resumen:</p>
+<div class="laylist">
+<div class="lay"><span class="sw" style="background:#c7c9cc"></span><div><b>Tubo de haz</b> — vacío por donde circulan los protones.</div></div>
+<div class="lay"><span class="sw" style="background:#f2a900;border-radius:50%"></span><div><b>Punto de colisión</b> — vértice donde se crea la partícula madre.</div></div>
+<div class="lay"><span class="sw" style="background:#5ec8e8"></span><div><b>Tracker</b> — mide trayectorias y momento (curvatura).</div></div>
+<div class="lay"><span class="sw" style="background:#ffcc33"></span><div><b>Preshower</b> — discos delgados de silicio delante del ECAL de las tapas.</div></div>
+<div class="lay"><span class="sw" style="background:#2f9bd6"></span><div><b>ECAL</b> — energía de electrones y fotones.</div></div>
+<div class="lay"><span class="sw" style="background:#8c9096"></span><div><b>HCAL</b> — energía de hadrones.</div></div>
+<div class="lay"><span class="sw" style="background:#c7c9cc;border:1px solid #f2a900"></span><div><b>Solenoide 3.8 T</b> — curva las partículas cargadas.</div></div>
+<div class="lay"><span class="sw" style="background:#1a6fb0"></span><div><b>Cámaras de muones</b> — solo llegan muones (y neutrinos).</div></div>
+<div class="lay"><span class="sw" style="background:#c81d25"></span><div><b>Anillo exterior / yugo</b> — paneles rojos característicos del CMS.</div></div>
+<div class="lay"><span class="sw" style="background:#f2a900"></span><div><b>Calorímetro frontal (HF)</b> — acero + fibras de cuarzo, a ~11 m, junto al haz.</div></div>
+<div class="lay"><span class="sw" style="background:#4c9a4c"></span><div><b>Estructura verde</b> — soporte mecánico en la caverna.</div></div>
+<div class="lay"><span class="sw" style="background:#ffcc33"></span><div><b>Trayectoria dorada</b> = muon 1; <span style="color:#5ec8e8">cian</span> = muon 2. Cargas opuestas curvan en sentidos opuestos.</div></div>
+</div>
+<p style="margin-top:12px;font-size:13.5px;color:var(--gray)">La geometría es esquemática y la curvatura de las trayectorias se exagera a propósito para que sea visible; con 3.8 T un muon de 40 GeV se vería prácticamente recto dentro del detector. La física del cálculo (Q, M², M) no se simplifica.</p>
+</section>
+
+<section class="edusec" id="sec-q" data-title="7. Preguntas guía">
+<h2><span class="num">7</span>Preguntas guía (del notebook original)</h2>
+<ul class="qs">
+<li>¿Qué pasa si <b>aumentas el número de bines</b> del histograma? ¿Y si lo disminuyes? ¿Cómo cambia la visibilidad del pico frente al ruido estadístico?</li>
+<li>¿En qué caso el ajuste se ve mejor: con <b>1000, 5000 o 10000 eventos</b>? ¿Cómo cambian μ, σ y sus incertidumbres?</li>
+<li>¿Por qué es necesario exigir <b>Q = 0</b>? ¿Qué tipo de partícula madre estamos buscando?</li>
+<li>¿Por qué puede salir <b>M² &lt; 0</b> para algunos pares? ¿Qué nos dice eso sobre la resolución del detector y sobre las combinaciones falsas?</li>
+<li>¿Qué diferencia observas entre ajustar solo una gaussiana y ajustar <b>gaussiana + recta</b>? ¿Cuál describe mejor los datos?</li>
+<li>Compara el centro del pico del Z⁰ con el valor de la literatura (91.1876 GeV). ¿A qué se debe la diferencia? ¿Y la anchura σ: es la anchura natural del Z⁰ (≈2.5 GeV) o la resolución del detector?</li>
+<li>Repite el análisis en el rango del <b>J/ψ</b> (2.9–3.3 GeV). ¿Por qué el pico es mucho más estrecho? ¿Ves otras resonancias entre 9 y 11 GeV (Υ)?</li>
+</ul>
+</section>
+</div>
+</div>
+`,
+en:`
+<div class="edudoc">
+<nav class="edunav" aria-label="Contents"></nav>
+<div class="educontent">
+<div class="edu-hero">
+  <div class="edu-kicker">Companion document · CMS Open Data · Dimuons</div>
+  <h1 class="edu-title">Invariant-mass reconstruction with two muons</h1>
+  <p class="edu-sub">From the energy and momentum of two muons to the mass of a particle that was never directly detected: the equations, the pipeline, the fit model, the detector and the questions worth asking.</p>
+</div>
+
+<section class="edusec" id="sec-eq" data-title="1. Fundamental equations">
+<h2><span class="num">1</span>Fundamental equations</h2>
+<p>Relativistic energy–momentum relation:</p>
+<div class="eq" data-tex="E^2 = m^2 c^4 + P^2 c^2"></div>
+<p>Four-momentum of a particle:</p>
+<div class="eq" data-tex="P^{\\mu} = \\left(\\tfrac{E}{c},\\, P_x,\\, P_y,\\, P_z\\right)"></div>
+<p>Invariant mass squared (norm of the four-vector):</p>
+<div class="eq" data-tex="m^2 c^2 = \\left(\\tfrac{E}{c}\\right)^2 - P^2"></div>
+<p>Four-momentum conservation in the decay mother → two daughters:</p>
+<div class="eq" data-tex="P^{\\mu} = P^{\\mu}_1 + P^{\\mu}_2"></div>
+<p>Invariant mass of the mother particle reconstructed from the two muons:</p>
+<div class="eq" data-tex="M = \\frac{1}{c^2}\\sqrt{(E_1+E_2)^2 - (p_{x1}+p_{x2})^2 - (p_{y1}+p_{y2})^2 - (p_{z1}+p_{z2})^2}"></div>
+<p>The dataset uses natural units (<i>c</i> = 1): energies in GeV and momenta in GeV/c.</p>
+</section>
+
+<section class="edusec" id="sec-pipe" data-title="2. Analysis pipeline">
+<h2><span class="num">2</span>Analysis pipeline (reproduced by the tool)</h2>
+<div class="eq" data-tex="Q = Q_1 + Q_2 \\quad\\Rightarrow\\quad \\text{keep } Q = 0"></div>
+<div class="eq" data-tex="M^2 = (E_1+E_2)^2 - (p_{x1}+p_{x2})^2 - (p_{y1}+p_{y2})^2 - (p_{z1}+p_{z2})^2 \\quad\\Rightarrow\\quad \\text{keep } M^2 > 0"></div>
+<div class="eq" data-tex="M = \\sqrt{M^2}"></div>
+<p>Histogramming <i>M</i> over many events reveals resonance peaks: a broad one near 91 GeV (Z⁰ boson, reference 91.1876 GeV) and a narrow one near 3.1 GeV (J/ψ meson, reference ≈ 3.0969 GeV), plus other minor resonances below 25 GeV (ψ', Υ(1S,2S,3S), …).</p>
+<div class="callout"><div class="ct">Check</div>The first event of the real dataset (record 5201) must give M ≈ 17.4922 GeV with this pipeline. It is the quick sanity check that the loaded data and the computation are correct.</div>
+</section>
+
+<section class="edusec" id="sec-fit" data-title="3. Fit model">
+<h2><span class="num">3</span>Fit model: signal + combinatorial background</h2>
+<p>The real histogram is a mixture of <b>signal</b> (Gaussian around the peak) and <b>combinatorial background</b> (muon pairs not coming from the same particle, modelled as a decreasing straight line). Hence the correct fit is <i>linear background + Gaussian</i>, not a pure Gaussian:</p>
+<div class="eq" data-tex="f(M) = \\underbrace{a + b\\,M}_{\\text{background}} + \\underbrace{A\\, e^{-\\frac{(M-\\mu)^2}{2\\sigma^2}}}_{\\text{signal}}"></div>
+<p>In the original notebook the fit is done with <code>lmfit</code> (GaussianModel + LinearModel). Here, the live fit uses non-linear least squares (Levenberg–Marquardt) in JavaScript and, in the Python tab, <code>scipy.optimize.curve_fit</code> with the same model.</p>
+<h3>How to read the parameters</h3>
+<ul>
+<li><b>μ</b> — peak centre: the reconstructed mass of the mother particle.</li>
+<li><b>σ</b> — peak width: in practice, the resolution with which the detector measures mass in that region (see section 4).</li>
+<li><b>A</b> — peak height above background; grows with the number of events.</li>
+<li><b>a, b</b> — the combinatorial-background line.</li>
+<li><b>χ²/ndf</b> — fit quality; values close to 1 indicate the model describes the statistical fluctuations well.</li>
+</ul>
+</section>
+
+<section class="edusec" id="sec-gauss" data-title="4. Why a Gaussian?">
+<h2><span class="num">4</span>Why a Gaussian for the peak?</h2>
+<p class="lead">The "natural" shape of a resonance is not a Gaussian. Approximately, the shape the detector observes is.</p>
+<p>Physically, a real resonance like the Z⁰ or the J/ψ does not have an exact mass: because of its finite lifetime τ, its mass distribution has a <b>Breit–Wigner</b> shape whose natural width Γ is tied to that lifetime (Γ = ħ/τ). For the Z⁰, Γ ≈ 2.5 GeV; for the J/ψ, Γ ≈ 0.09 MeV, about 30 000 times smaller.</p>
+<div class="eq" data-tex="BW(M) \\;\\propto\\; \\frac{1}{(M^2 - M_0^2)^2 + M_0^2\\,\\Gamma^2}"></div>
+<p>But what the detector observes is not that pure shape: it is that shape <b>"smeared" by the finite resolution of the instrument</b>. Each energy and momentum measurement of the muons carries a small error, and that error propagates into M. The observed shape is the convolution of the natural shape with the detector response function.</p>
+<p>When the experimental resolution is much larger than the natural width — clearly the case for the J/ψ — the observed shape is dominated by the measurement error. That error is the sum of many small independent contributions (hit positions in the tracker, alignment, magnetic-field map, energy loss in material…), and by the <b>central limit theorem</b> its distribution tends to be Gaussian. That is why a Gaussian is a reasonable, standard approximation for the observed peak. For the Z⁰, resolution and Γ are comparable, so the fitted σ mixes both: the Gaussian works as an effective description of the peak.</p>
+<div class="callout gold"><div class="ct">The more rigorous version</div>A more rigorous analysis would fit the Breit–Wigner ⊗ Gaussian convolution (<b>Voigt</b> profile), which separates the natural width Γ from the resolution σ. Here it is simplified to a Gaussian for didactic clarity, as the original notebook does.</div>
+<div class="callout green"><div class="ct">Connection with the app</div>Below the fit, the box "What does this result mean?" translates σ into plain language: how much a single mass measurement can vary purely because of the instrument's precision, and whether the difference between μ and the reference value fits within that margin.</div>
+</section>
+
+<section class="edusec" id="sec-cms" data-title="5. Why CMS detects muons so well">
+<h2><span class="num">5</span>Why is CMS so good at detecting muons?</h2>
+<p class="lead">CMS literally stands for <b>Compact Muon Solenoid</b>: the detector is designed around this capability.</p>
+<h3>a) Only muons cross all the inner layers</h3>
+<p>Electrons and photons deposit all their energy in the electromagnetic calorimeter; quarks and gluons turn into jets of hadrons that are absorbed in the hadron calorimeter. The muon, instead, does not feel the strong force and, because of its large mass compared with the electron's, loses very little energy through bremsstrahlung; its ionisation loss is small and steady. So it crosses tracker, ECAL and HCAL without being absorbed.</p>
+<h3>b) That is why the muon chambers are the outermost layer</h3>
+<p>The muon chambers are placed outside everything else — even outside the solenoid magnet — interleaved with the iron yoke. If something charged gets there, it is a muon with very high probability. It is a "natural filter": the detector itself isolates muons by elimination.</p>
+<h3>c) A 3.8 T solenoid: two independent momentum measurements</h3>
+<p>The CMS superconducting solenoid produces ≈3.8 T, one of the strongest magnetic fields used in a detector of this kind. It bends charged-particle tracks inside the tracker and, through the return field in the yoke, also within the muon chambers themselves. This allows the momentum to be measured with good precision in two independent regions — inside and outside the magnet — and the two measurements to be combined to confirm and improve the result.</p>
+<h3>d) Isolation + double measurement = excellent dimuon resolution</h3>
+<p>The combination of a clean channel (almost only muons arrive) with a precise momentum measurement in two regions is what gives CMS its excellent resolution in the dimuon channel. This is why the Higgs discovery and many other searches rely on channels with muons.</p>
+<div class="callout red"><div class="ct">From the notebook</div>The original notebook sums it up: the experiment "is designed so that only muons (and neutrinos, which are undetectable in practice) reach the outermost detector systems, making it possible to identify muons".</div>
+</section>
+
+<section class="edusec" id="sec-layers" data-title="6. Detector layers (3D)">
+<h2><span class="num">6</span>Detector layer legend (3D view)</h2>
+<p>Hover over each layer in the 3D view to read its description. This is the summary:</p>
+<div class="laylist">
+<div class="lay"><span class="sw" style="background:#c7c9cc"></span><div><b>Beam pipe</b> — vacuum where protons circulate.</div></div>
+<div class="lay"><span class="sw" style="background:#f2a900;border-radius:50%"></span><div><b>Collision point</b> — vertex where the mother particle is created.</div></div>
+<div class="lay"><span class="sw" style="background:#5ec8e8"></span><div><b>Tracker</b> — measures tracks and momentum (curvature).</div></div>
+<div class="lay"><span class="sw" style="background:#ffcc33"></span><div><b>Preshower</b> — thin silicon discs in front of the endcap ECAL.</div></div>
+<div class="lay"><span class="sw" style="background:#2f9bd6"></span><div><b>ECAL</b> — energy of electrons and photons.</div></div>
+<div class="lay"><span class="sw" style="background:#8c9096"></span><div><b>HCAL</b> — energy of hadrons.</div></div>
+<div class="lay"><span class="sw" style="background:#c7c9cc;border:1px solid #f2a900"></span><div><b>3.8 T solenoid</b> — bends charged particles.</div></div>
+<div class="lay"><span class="sw" style="background:#1a6fb0"></span><div><b>Muon chambers</b> — only muons (and neutrinos) get here.</div></div>
+<div class="lay"><span class="sw" style="background:#c81d25"></span><div><b>Outer ring / yoke</b> — the characteristic red CMS panels.</div></div>
+<div class="lay"><span class="sw" style="background:#f2a900"></span><div><b>Forward calorimeter (HF)</b> — steel + quartz fibres, ~11 m out, next to the beam.</div></div>
+<div class="lay"><span class="sw" style="background:#4c9a4c"></span><div><b>Green structure</b> — mechanical support in the cavern.</div></div>
+<div class="lay"><span class="sw" style="background:#ffcc33"></span><div><b>Gold track</b> = muon 1; <span style="color:#5ec8e8">cyan</span> = muon 2. Opposite charges bend in opposite directions.</div></div>
+</div>
+<p style="margin-top:12px;font-size:13.5px;color:var(--gray)">The geometry is schematic and the track curvature is deliberately exaggerated to be visible; at 3.8 T a 40 GeV muon would look practically straight inside the detector. The physics of the computation (Q, M², M) is not simplified.</p>
+</section>
+
+<section class="edusec" id="sec-q" data-title="7. Guiding questions">
+<h2><span class="num">7</span>Guiding questions (from the original notebook)</h2>
+<ul class="qs">
+<li>What happens if you <b>increase the number of bins</b> of the histogram? And if you decrease it? How does the visibility of the peak change with respect to statistical noise?</li>
+<li>In which case does the fit look better: with <b>1000, 5000 or 10000 events</b>? How do μ, σ and their uncertainties change?</li>
+<li>Why is it necessary to require <b>Q = 0</b>? What kind of mother particle are we looking for?</li>
+<li>Why can <b>M² &lt; 0</b> occur for some pairs? What does that tell us about detector resolution and fake combinations?</li>
+<li>What difference do you see between fitting only a Gaussian and fitting <b>Gaussian + line</b>? Which one describes the data better?</li>
+<li>Compare the Z⁰ peak centre with the literature value (91.1876 GeV). What causes the difference? And the width σ: is it the natural width of the Z⁰ (≈2.5 GeV) or the detector resolution?</li>
+<li>Repeat the analysis in the <b>J/ψ</b> range (2.9–3.3 GeV). Why is the peak so much narrower? Do you see other resonances between 9 and 11 GeV (Υ)?</li>
+</ul>
+</section>
+</div>
+</div>
+`};
+
+let lang = 'es';
+// Nota: reemplaza TODAS las apariciones de cada marcador {k} (la versión anterior solo la primera).
+function t(key, vars){ let s=(T[lang][key]!==undefined?T[lang][key]:(T.es[key]||key)); if(vars) for(const k in vars) s=s.split('{'+k+'}').join(vars[k]); return s; }
+function applyLang(){
+  document.documentElement.lang = lang;
+  document.querySelectorAll('[data-i18n]').forEach(el=>{
+    const k=el.getAttribute('data-i18n'); if(T[lang][k]!==undefined) el.innerHTML=T[lang][k];
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{
+    const k=el.getAttribute('data-i18n-placeholder'); if(T[lang][k]!==undefined) el.placeholder=T[lang][k];
+  });
+  document.getElementById('langEs').classList.toggle('active',lang==='es');
+  document.getElementById('langEn').classList.toggle('active',lang==='en');
+  document.getElementById('aboutBody').innerHTML = ABOUT[lang];
+  document.getElementById('eduBody').innerHTML = EDU[lang];
+  renderMath();
+  buildEduNav();
+  buildSnippets();
+  refreshFileStatus(); refreshCountInfo(); refreshEventPanel(); refreshChart(true); updateSpeedLabel(); refreshPyStatus(); updatePlayButtons(true);
+  if(chart){ chart.options.scales.x.title.text=t('ax_m'); chart.options.scales.y.title.text=t('ax_n'); chart.data.datasets[0].label=t('ch_counts'); chart.data.datasets[1].label=t('ch_fit'); chart.update('none'); buildChartLegend(); }
+}
+function renderMath(){
+  if(!window.katex) return;
+  document.querySelectorAll('.eq[data-tex]').forEach(el=>{
+    try{ katex.render(el.getAttribute('data-tex'), el, {displayMode:true, throwOnError:false}); }catch(e){ el.textContent=el.getAttribute('data-tex'); }
+  });
+}
+/** Tabla de contenidos del panel educativo: se genera a partir de las <section class="edusec"> */
+function buildEduNav(){
+  const body=document.getElementById('eduBody');
+  const nav=body.querySelector('.edunav'); if(!nav) return;
+  const secs=Array.from(body.querySelectorAll('.edusec'));
+  nav.innerHTML='<div class="lbl">'+t('edu_toc')+'</div>';
+  const links=secs.map((s,i)=>{
+    const a=document.createElement('a'); a.href='#'+s.id; a.textContent=s.getAttribute('data-title'); if(i===0) a.classList.add('active');
+    a.onclick=e=>{ e.preventDefault(); body.scrollTo({top:s.offsetTop-6,behavior:'smooth'}); links.forEach(x=>x.classList.remove('active')); a.classList.add('active'); };
+    nav.appendChild(a); return a;
+  });
+  body.onscroll=()=>{
+    const top=body.scrollTop+90; let cur=0;
+    secs.forEach((s,i)=>{ if(s.offsetTop<=top) cur=i; });
+    links.forEach((a,i)=>a.classList.toggle('active',i===cur));
+  };
+  body.scrollTop=0;
+}
+
+/* =====================================================================================
+   2. CAPA DE DATOS Y FÍSICA
+   ===================================================================================== */
+const REQUIRED = ['E1','px1','py1','pz1','Q1','E2','px2','py2','pz2','Q2'];
+const S = {                  // estado global de la sesión
+  rows: [], csvText: '', fileName:'',
+  idx: 0, limit: 0, playing:false, frozen:false, acc:0,
+  total:0, accepted:0, rejected:0,
+  masses: [],                // M de todos los eventos aceptados
+  counts: [],                // histograma en el rango actual
+  inRange:0, sumM:0, sumM2:0,
+  rmin:0, rmax:120, nbins:120,
+  lastFit:null, lastEvent:null, lastResult:null, finished:false,
+};
+
+/** Pipeline físico exacto del notebook: Q = Q1+Q2 ; M² = (E1+E2)² − |p1+p2|² ; M = √M² */
+function analyzeEvent(r){
+  const Q = r.Q1 + r.Q2;
+  const E = r.E1 + r.E2, px = r.px1 + r.px2, py = r.py1 + r.py2, pz = r.pz1 + r.pz2;
+  const M2 = E*E - px*px - py*py - pz*pz;
+  const okQ = (Q === 0), okM = (M2 > 0);
+  const accepted = okQ && okM;
+  return { Q, M2, M: accepted ? Math.sqrt(M2) : NaN, accepted, okQ, okM };
+}
+
+function setFileStatus(cls, msg){ const el=document.getElementById('fileStatus'); el.className=cls; el.textContent=msg; el.dataset.msg=msg; }
+function refreshFileStatus(){
+  const el=document.getElementById('fileStatus');
+  if(S.rows.length) setFileStatus('ok', t('file_ok',{n:S.rows.length.toLocaleString(), f:S.fileName}));
+  else if(!el.classList.contains('err')) setFileStatus('', t('file_none'));
+}
+
+// Callback compartido por loadFile() (archivo local) y loadFromUrl() (fetch remoto):
+// valida columnas, filtra filas numéricas válidas y actualiza el estado de sesión.
+// NOTA: no se le pasa `transformHeader` a Papa.parse cuando worker:true (ver loadFile) porque
+// PapaParse no puede clonar funciones al Web Worker (DataCloneError en navegador real, detectado
+// con una prueba automatizada tras la ronda de mejoras 3D). Por eso el trimming de encabezados con
+// espacios se hace aquí, remapeando filas después del parseo en vez de durante él.
+function handleParsedCsv(res){
+  try{
+    const rawFields = (res.meta && res.meta.fields) ? res.meta.fields : [];
+    const fields = rawFields.map(f=>String(f).trim());
+    const missing = REQUIRED.filter(c=>!fields.includes(c));
+    if(missing.length){ S.rows=[]; setFileStatus('err', t('err_cols',{c:missing.join(', ')})); return; }
+    const needsRemap = rawFields.some((f,i)=>f!==fields[i]);
+    const data = needsRemap
+      ? res.data.map(r=>{ const nr={}; rawFields.forEach((rf,i)=>{ nr[fields[i]]=r[rf]; }); return nr; })
+      : res.data;
+    const rows = data.filter(r => REQUIRED.every(c => typeof r[c]==='number' && isFinite(r[c])));
+    if(!rows.length){ S.rows=[]; setFileStatus('err', t('err_empty')); return; }
+    S.rows = rows;
+    resetSession();
+    refreshFileStatus(); refreshCountInfo();
+    if(pyReady) loadDataIntoPy();
+  }catch(err){ S.rows=[]; setFileStatus('err', t('err_parse',{e:err.message})); }
+}
+
+function loadFile(file){
+  if(!file) return;
+  setFileStatus('', t('file_loading'));
+  S.fileName = file.name;
+  const reader = new FileReader();
+  reader.onload = e => { S.csvText = e.target.result; };
+  reader.readAsText(file);
+  // Sin `transformHeader` aquí a propósito (ver nota en handleParsedCsv): con worker:true,
+  // PapaParse no puede enviarle una función al hilo del Worker.
+  Papa.parse(file, {
+    header:true, dynamicTyping:true, skipEmptyLines:true, worker:true,
+    complete: handleParsedCsv,
+    error: err => { S.rows=[]; setFileStatus('err', t('err_parse',{e:err.message||err})); }
+  });
+}
+
+// Carga de datos por URL remota (ver nota 7 en el encabezado del archivo sobre las
+// limitaciones de CORS / file:// de este enfoque).
+function loadFromUrl(url){
+  url = (url||'').trim();
+  if(!url){ setFileStatus('err', t('url_empty')); return; }
+  setFileStatus('', t('url_loading'));
+  fetch(url, {mode:'cors'})
+    .then(resp => {
+      if(!resp.ok) throw new Error(t('err_url_http',{s:resp.status}));
+      return resp.text();
+    })
+    .then(text => {
+      S.csvText = text;
+      try{ S.fileName = decodeURIComponent(url.split('/').pop().split('?')[0]) || url; }catch(_){ S.fileName = url; }
+      Papa.parse(text, {
+        header:true, dynamicTyping:true, skipEmptyLines:true,
+        transformHeader: h => String(h).trim(),
+        complete: handleParsedCsv,
+        error: err => { S.rows=[]; setFileStatus('err', t('err_parse',{e:err.message||err})); }
+      });
+    })
+    .catch(err => {
+      S.rows=[];
+      // err.message ya trae el detalle de HTTP si vino del throw de arriba; si es un
+      // TypeError de red/CORS, err.message suele ser genérico ("Failed to fetch").
+      setFileStatus('err', t('err_url_fetch',{e:err.message||err}));
+    });
+}
+
+/* =====================================================================================
+   3. RENDERIZADO 3D (Three.js) — detector esquemático + trayectorias
+   -------------------------------------------------------------------------------------
+   Versión 3: geometría inspirada en el diagrama técnico oficial "CMS DETECTOR" (ver nota
+   4 del encabezado). Unidades ≈ metros. Eje z = dirección del haz.
+     · Región central: tracker, preshower (discos), ECAL y HCAL (barril + tapas), solenoide.
+     · Yugo de retorno de acero: 3 capas × 5 ruedas × 12 sectores (InstancedMesh).
+     · Cámaras de muones del barril: 4 estaciones × 5 ruedas × 12 paneles (InstancedMesh).
+     · Tapas: discos dodecagonales de yugo (rojo) intercalados con discos de cámaras (azul).
+     · Calorímetro frontal (HF): cilindro + collar cónico ámbar a ~11 m de cada lado.
+     · Soporte verde: 12 vigas (InstancedMesh) + patas + base + carros de las tapas.
+   Las trayectorias (trackPoints/spawnTracks/updateTracks) NO cambian: solo R_MAX/Z_MAX se
+   ajustan al nuevo volumen (radio 7.3 m, semi-longitud 9.9 m hasta el último disco).
+   ===================================================================================== */
+let scene, camera, renderer, controls, raycaster, mouse=new THREE.Vector2(-9,-9);
+const layerMeshes=[]; const tracks=[];  // tracks: {line, mat, hit, n, progress, dur, age, done}
+const R_MAX=7.3, Z_MAX=9.9;
+/** Vista de corte (versión 4, a solicitud): un plano de recorte de WebGL fijo en el mundo
+ *  (no sigue a la cámara) elimina la mitad del detector con x > ~0.04 m (el lado más
+ *  cercano a la posición inicial de la cámara), dejando ese lado "abierto" para que las
+ *  trayectorias y las capas internas se vean sin la superposición de capas semitransparentes
+ *  del lado cercano. Solo se aplica a las capas tipo "cebolla" (tracker, calorímetros,
+ *  solenoide, yugo, cámaras de muones, tapas, HF); el tubo del haz, la estructura de
+ *  soporte, el punto de colisión y las TRAYECTORIAS nunca se recortan. Al no generar una
+ *  "tapa" sólida en el corte (simplificación esquemática ya documentada en la nota 4), el
+ *  borde cortado se ve como una pared hueca abierta, coherente con que este no es un
+ *  modelo CAD. Si el usuario orbita la cámara al otro lado, verá la mitad restante entera. */
+const CUTAWAY_PLANE = new THREE.Plane(new THREE.Vector3(-1,0,0), 0.04);
+
+/** Cilindro hueco (anillo extruido) centrado en z (por defecto 0). Si `noRings` es true no se
+ *  dibujan las aristas de los extremos (ahorra geometría en piezas pequeñas/repetidas). */
+function hollowCylinder(rIn, rOut, len, color, opacity, key, segs, extra, z, noRings){
+  const shape = new THREE.Shape(); shape.absarc(0,0,rOut,0,Math.PI*2,false);
+  const hole = new THREE.Path(); hole.absarc(0,0,rIn,0,Math.PI*2,true); shape.holes.push(hole);
+  const geo = new THREE.ExtrudeGeometry(shape,{depth:len,bevelEnabled:false,curveSegments:segs||64});
+  geo.translate(0,0,-len/2);
+  const mat = new THREE.MeshStandardMaterial(Object.assign({color, transparent:true, opacity, side:THREE.DoubleSide, roughness:.45, metalness:.55, depthWrite:false, emissive:color, emissiveIntensity:.08}, extra||{}));
+  const mesh = new THREE.Mesh(geo, mat); mesh.userData={key, baseOpacity:opacity, baseEm:mat.emissiveIntensity};
+  mesh.renderOrder = Math.round(rOut*10);
+  mesh.position.z = z||0;
+  if((segs||64)===12) mesh.rotation.z = Math.PI/12;   // dodecágono con lado plano arriba/abajo
+  scene.add(mesh); layerMeshes.push(mesh);
+  if(!noRings){
+    // aristas: anillos en los extremos
+    const pts=[]; const n=segs||64; for(let i=0;i<n;i++){ const a=i/n*Math.PI*2+(n===12?Math.PI/12:0); pts.push(new THREE.Vector3(rOut*Math.cos(a),rOut*Math.sin(a),0)); }
+    const lg = new THREE.BufferGeometry().setFromPoints(pts);
+    const lm = new THREE.LineBasicMaterial({color, transparent:true, opacity:Math.min(1,opacity+.35)});
+    [len/2,-len/2].forEach(dz=>{ const l=new THREE.LineLoop(lg,lm); l.position.z=(z||0)+dz; scene.add(l); });
+  }
+  return mesh;
+}
+
+/** Sector anular (cuña) extruido en z, centrado en el ángulo 0 y en z = 0. Se reutiliza como
+ *  geometría base de los InstancedMesh del yugo y de las cámaras de muones del barril. */
+function sectorGeometry(rIn, rOut, spanDeg, depth){
+  const h=spanDeg*Math.PI/360;
+  const s=new THREE.Shape();
+  s.absarc(0,0,rOut,-h,h,false);
+  s.absarc(0,0,rIn,h,-h,true);
+  s.closePath();
+  const g=new THREE.ExtrudeGeometry(s,{depth,bevelEnabled:false,curveSegments:4});
+  g.translate(0,0,-depth/2);
+  return g;
+}
+
+const _m4=new THREE.Matrix4(), _q=new THREE.Quaternion(), _p=new THREE.Vector3(), _s=new THREE.Vector3(1,1,1), _zAxis=new THREE.Vector3(0,0,1);
+/** Anillo de `count` sectores repetido en cada z de `zs`, en UNA sola llamada de dibujo (InstancedMesh). */
+function instancedRing(geo, matOpts, key, zs, count, rOut){
+  const mat=new THREE.MeshStandardMaterial(Object.assign({transparent:true, side:THREE.DoubleSide, roughness:.45, metalness:.6, depthWrite:false, emissiveIntensity:.1}, matOpts));
+  const im=new THREE.InstancedMesh(geo, mat, zs.length*count); let k=0;
+  for(const z of zs) for(let i=0;i<count;i++){ _q.setFromAxisAngle(_zAxis,(i+.5)/count*Math.PI*2); _p.set(0,0,z); _m4.compose(_p,_q,_s); im.setMatrixAt(k++,_m4); }
+  im.instanceMatrix.needsUpdate=true;
+  im.userData={key, baseOpacity:mat.opacity, baseEm:mat.emissiveIntensity};
+  im.renderOrder=Math.round(rOut*10);
+  scene.add(im); layerMeshes.push(im); return im;
+}
+
+/** Contorno dodecagonal (líneas) en un plano z: separa visualmente las ruedas del yugo. */
+function edgeRing(r, z, color, opacity){
+  const pts=[]; for(let i=0;i<12;i++){ const a=i/12*Math.PI*2+Math.PI/12; pts.push(new THREE.Vector3(r*Math.cos(a),r*Math.sin(a),0)); }
+  const l=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({color, transparent:true, opacity}));
+  l.position.z=z; scene.add(l);
+}
+
+function glowTexture(){
+  const c=document.createElement('canvas'); c.width=c.height=128; const g=c.getContext('2d');
+  const grd=g.createRadialGradient(64,64,0,64,64,64); grd.addColorStop(0,'rgba(255,220,120,1)'); grd.addColorStop(.3,'rgba(242,169,0,.6)'); grd.addColorStop(1,'rgba(242,169,0,0)');
+  g.fillStyle=grd; g.fillRect(0,0,128,128); return new THREE.CanvasTexture(c);
+}
+
+function init3D(){
+  const wrap=document.getElementById('threeWrap');
+  scene=new THREE.Scene(); scene.background=new THREE.Color(0x050507);
+  scene.fog=new THREE.FogExp2(0x050507,0.008);
+  camera=new THREE.PerspectiveCamera(50, wrap.clientWidth/Math.max(1,wrap.clientHeight), 0.1, 500);
+  camera.position.set(15,9,22);
+  renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight); wrap.appendChild(renderer.domElement);
+  renderer.localClippingEnabled=true; // habilita CUTAWAY_PLANE (vista de corte, ver nota junto a R_MAX/Z_MAX)
+  controls=new THREE.OrbitControls(camera, renderer.domElement); controls.enableDamping=true; controls.dampingFactor=.08; controls.minDistance=2; controls.maxDistance=90;
+  raycaster=new THREE.Raycaster();
+
+  scene.add(new THREE.AmbientLight(0x8090a0, .9));
+  const l1=new THREE.PointLight(0xffffff,1.1,140); l1.position.set(14,16,18); scene.add(l1);
+  const l2=new THREE.PointLight(0x5ec8e8,.6,140); l2.position.set(-14,-6,-18); scene.add(l2);
+  const l3=new THREE.PointLight(0xf2a900,.7,30); l3.position.set(0,0,0); scene.add(l3);
+
+  // ---- Región central (unidades ≈ metros; eje z = haz) ----
+  hollowCylinder(0.035,0.06,28,0xc7c9cc,0.9,'layer_beam',32,{metalness:.9,roughness:.2,emissiveIntensity:.02});
+  hollowCylinder(0.15,1.2,5.8,0x5ec8e8,0.17,'layer_tracker',64,{clippingPlanes:[CUTAWAY_PLANE]});                                           // Silicon Trackers
+  [3.05,-3.05].forEach(z=>hollowCylinder(0.45,1.25,0.1,0xffcc33,0.35,'layer_preshower',48,{emissive:0xffcc33,emissiveIntensity:.15,clippingPlanes:[CUTAWAY_PLANE]},z,true)); // Preshower (discos)
+  hollowCylinder(1.3,1.75,6.2,0x2f9bd6,0.26,'layer_ecal',64,{clippingPlanes:[CUTAWAY_PLANE]});                                              // ECAL barril
+  [3.55,-3.55].forEach(z=>hollowCylinder(0.4,1.75,0.5,0x2f9bd6,0.30,'layer_ecal',48,{clippingPlanes:[CUTAWAY_PLANE]},z,true));        // ECAL tapas
+  hollowCylinder(1.8,2.9,7.0,0x8c9096,0.20,'layer_hcal',64,{clippingPlanes:[CUTAWAY_PLANE]});                                               // HCAL barril
+  [4.8,-4.8].forEach(z=>hollowCylinder(0.45,2.9,1.8,0x8c9096,0.22,'layer_hcal',48,{clippingPlanes:[CUTAWAY_PLANE]},z,true));          // HCAL tapas
+  hollowCylinder(2.95,3.8,12.6,0xc7c9cc,0.30,'layer_solenoid',64,{metalness:.9,roughness:.25,emissive:0xf2a900,emissiveIntensity:.05,clippingPlanes:[CUTAWAY_PLANE]}); // Solenoide
+
+  // ---- Yugo de retorno de acero (ruedas de 12 sectores) + cámaras de muones del barril ----
+  const WHEELS=[-5.2,-2.6,0,2.6,5.2], WL=2.35;
+  const yokeMat={color:0xc81d25,opacity:.5,emissive:0xc81d25,emissiveIntensity:.18,metalness:.7,roughness:.4,clippingPlanes:[CUTAWAY_PLANE]};
+  [[4.35,4.9],[5.35,5.9],[6.35,6.9]].forEach(([a,b])=>instancedRing(sectorGeometry(a,b,27.5,WL),yokeMat,'layer_yoke',WHEELS,12,b));
+  const muMat={color:0x1a6fb0,opacity:.32,emissive:0x1a6fb0,emissiveIntensity:.1,clippingPlanes:[CUTAWAY_PLANE]};
+  [[3.95,4.3],[4.95,5.3],[5.95,6.3]].forEach(([a,b])=>instancedRing(sectorGeometry(a,b,24,WL-0.3),muMat,'layer_muon',WHEELS,12,b));
+  instancedRing(sectorGeometry(6.95,7.3,24,WL-0.3),{color:0x1a4d7a,opacity:.35,emissive:0x5ec8e8,emissiveIntensity:.1,clippingPlanes:[CUTAWAY_PLANE]},'layer_muon_out',WHEELS,12,7.3);
+  WHEELS.forEach(z=>{ edgeRing(7.3,z-WL/2,0xc7c9cc,.5); edgeRing(7.3,z+WL/2,0xc7c9cc,.5); });
+
+  // ---- Tapas (endcaps) y calorímetro frontal, a ambos lados ----
+  [1,-1].forEach(sg=>{
+    // Discos de yugo (acero rojo) intercalados con discos de cámaras de muones (CSC + RPC)
+    [[7.25,.6],[8.5,.6],[9.6,.45]].forEach(([z,th])=>hollowCylinder(0.95,7.3,th,0xc81d25,0.5,'layer_endcap',12,{emissive:0xc81d25,emissiveIntensity:.15,metalness:.7,roughness:.4,clippingPlanes:[CUTAWAY_PLANE]},sg*z));
+    [6.75,7.85,9.05,9.95].forEach(z=>hollowCylinder(1.1,7.0,0.16,0x1a6fb0,0.4,'layer_muon_endcap',12,{emissive:0x1a6fb0,emissiveIntensity:.12,clippingPlanes:[CUTAWAY_PLANE]},sg*z,true));
+    // Forward Calorimeter (HF): cilindro + collar cónico ámbar
+    hollowCylinder(0.15,1.5,1.65,0xf2a900,0.5,'layer_hf',32,{emissive:0xf2a900,emissiveIntensity:.22,metalness:.6,roughness:.5,clippingPlanes:[CUTAWAY_PLANE]},sg*11.2);
+    const cone=new THREE.Mesh(new THREE.CylinderGeometry(0.7,1.5,1.0,32,1,true), new THREE.MeshStandardMaterial({color:0xf2a900,transparent:true,opacity:.45,side:THREE.DoubleSide,depthWrite:false,emissive:0xf2a900,emissiveIntensity:.18,metalness:.6,roughness:.5,clippingPlanes:[CUTAWAY_PLANE]}));
+    cone.rotation.x=sg*Math.PI/2; cone.position.z=sg*12.55; cone.userData={key:'layer_hf',baseOpacity:.45,baseEm:.18}; cone.renderOrder=15; scene.add(cone); layerMeshes.push(cone);
+  });
+
+  // ---- Estructura verde de soporte ----
+  const gmat=new THREE.MeshStandardMaterial({color:0x2f6b2f,emissive:0x4c9a4c,emissiveIntensity:.15,roughness:.7,metalness:.3});
+  const beams=new THREE.InstancedMesh(new THREE.BoxGeometry(.22,.22,13.4),gmat,12);
+  for(let i=0;i<12;i++){ const a=i/12*Math.PI*2; _q.setFromAxisAngle(_zAxis,a); _p.set(7.7*Math.cos(a),7.7*Math.sin(a),0); _m4.compose(_p,_q,_s); beams.setMatrixAt(i,_m4); }
+  beams.instanceMatrix.needsUpdate=true; beams.userData={key:'layer_support',baseOpacity:1,baseEm:.15}; scene.add(beams); layerMeshes.push(beams);
+  const addGreen=(w,h,d,x,y,z)=>{ const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),gmat); b.position.set(x,y,z); b.userData={key:'layer_support',baseOpacity:1,baseEm:.15}; scene.add(b); layerMeshes.push(b); };
+  [[-4.2,-8.4],[4.2,-8.4]].forEach(([x,y])=>addGreen(.6,3.2,13,x,y+1.6,0));           // patas del barril
+  [1,-1].forEach(sg=>{ addGreen(5,1.3,3.4,0,-7.7,sg*8.4); addGreen(2.2,6.7,2.2,0,-5.0,sg*11.6); }); // carros de tapas y soporte del HF
+  addGreen(11,.5,22,0,-8.6,0);                                                           // base
+  // Rieles de la caverna
+  const grid=new THREE.GridHelper(60,30,0x1a4d7a,0x101820); grid.position.y=-8.9; scene.add(grid);
+
+  // Punto de colisión dorado
+  const core=new THREE.Mesh(new THREE.SphereGeometry(.11,24,24), new THREE.MeshStandardMaterial({color:0xffcc33,emissive:0xf2a900,emissiveIntensity:1.2}));
+  core.userData={key:'layer_vertex',baseOpacity:1,baseEm:1.2}; scene.add(core); layerMeshes.push(core);
+  const glow=new THREE.Sprite(new THREE.SpriteMaterial({map:glowTexture(),transparent:true,opacity:.9,depthWrite:false,blending:THREE.AdditiveBlending})); glow.scale.set(1.4,1.4,1); scene.add(glow); S.glow=glow;
+  // Ejes de referencia sutiles (dirección del haz)
+  const beamDir=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,-14),new THREE.Vector3(0,0,14)]), new THREE.LineDashedMaterial({color:0x8c9096,dashSize:.3,gapSize:.3,transparent:true,opacity:.35})); beamDir.computeLineDistances(); scene.add(beamDir);
+
+  renderer.domElement.addEventListener('mousemove', e=>{ const r=renderer.domElement.getBoundingClientRect(); mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1; S.mousePx={x:e.clientX-r.left,y:e.clientY-r.top}; });
+  renderer.domElement.addEventListener('mouseleave', ()=>{ mouse.set(-9,-9); document.getElementById('tooltip').style.display='none'; });
+  new ResizeObserver(()=>{ const w=wrap.clientWidth,h=wrap.clientHeight; if(!w||!h) return; camera.aspect=w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h); }).observe(wrap);
+}
+
+/** Trayectoria helicoidal esquemática: radio visual ∝ pT, sentido de giro según la carga.
+ *  Paso fino (0.03 m) para que la animación por vértices sea continua (ver nota 10). */
+function trackPoints(px,py,pz,q){
+  const pt=Math.hypot(px,py)||1e-6, phi0=Math.atan2(py,px), tanl=pz/pt;
+  const Rvis=Math.min(400, Math.max(1.2, pt*0.55));       // exageración visual documentada
+  const omega=(q===0?1e-6:-Math.sign(q))/Rvis;
+  const pts=[]; const ds=0.03;
+  for(let s=0;s<120;s+=ds){
+    let x,y; if(Math.abs(omega)<1e-5){ x=s*Math.cos(phi0); y=s*Math.sin(phi0); }
+    else{ x=(Math.sin(phi0+omega*s)-Math.sin(phi0))/omega; y=-(Math.cos(phi0+omega*s)-Math.cos(phi0))/omega; }
+    const z=s*tanl;
+    if(Math.hypot(x,y)>R_MAX||Math.abs(z)>Z_MAX) break;
+    pts.push(new THREE.Vector3(x,y,z));
+  }
+  if(pts.length<2) pts.push(new THREE.Vector3(0.01*Math.cos(phi0),0.01*Math.sin(phi0),0));
+  return pts;
+}
+
+const easeOutCubic = u => 1 - Math.pow(1-u, 3);
+
+function clearTracks(){
+  for(const tr of tracks){ scene.remove(tr.line); scene.remove(tr.hit); tr.line.geometry.dispose(); } tracks.length=0;
+}
+
+function spawnTracks(row, res, dur){
+  const specs=[[row.px1,row.py1,row.pz1,row.Q1,0xffcc33],[row.px2,row.py2,row.pz2,row.Q2,0x5ec8e8]];
+  specs.forEach(([px,py,pz,q,color])=>{
+    const pts=trackPoints(px,py,pz,q);
+    const geo=new THREE.BufferGeometry().setFromPoints(pts);
+    const mat=new THREE.LineBasicMaterial({color:res.accepted?color:0x8c9096, transparent:true, opacity:res.accepted?1:.45, linewidth:2});
+    const line=new THREE.Line(geo,mat); geo.setDrawRange(0, dur>0?2:pts.length); scene.add(line);
+    // punto luminoso en el extremo (hit en las cámaras de muones)
+    const hit=new THREE.Mesh(new THREE.SphereGeometry(.09,10,10), new THREE.MeshBasicMaterial({color:res.accepted?color:0x8c9096,transparent:true,opacity:res.accepted?1:.4}));
+    hit.position.copy(pts[pts.length-1]); hit.visible=(dur<=0); scene.add(hit);
+    tracks.push({line,mat,hit,n:pts.length,progress:0,dur,age:0,done:dur<=0});
+  });
+  while(tracks.length>60){ const o=tracks.shift(); scene.remove(o.line); scene.remove(o.hit); o.line.geometry.dispose(); }
+  if(S.glow){ S.glow.scale.set(2.6,2.6,1); }
+}
+
+/** Avanza el estado visual de las trayectorias un intervalo dt (segundos reales).
+ *  Si S.frozen es true no se llama: todo queda exactamente como estaba (pausa/paso). */
+function updateTracks(dt){
+  for(let i=tracks.length-1;i>=0;i--){
+    const tr=tracks[i];
+    if(!tr.done){
+      tr.progress+=dt/Math.max(0.02,tr.dur);
+      if(tr.progress>=1){ tr.progress=1; tr.done=true; tr.hit.visible=true; }
+      tr.line.geometry.setDrawRange(0, Math.max(2,Math.round(easeOutCubic(tr.progress)*tr.n)));
+    } else {
+      tr.age+=dt;
+      if(tr.age>1.2){ tr.mat.opacity*=Math.pow(0.15,dt); tr.hit.material.opacity=tr.mat.opacity; }
+      if(tr.mat.opacity<0.03){ scene.remove(tr.line); scene.remove(tr.hit); tr.line.geometry.dispose(); tracks.splice(i,1); }
+    }
+  }
+  if(S.glow){ const s=S.glow.scale.x; if(s>1.4){ const ns=Math.max(1.4,s-dt*3); S.glow.scale.set(ns,ns,1); } }
+}
+
+let hovered=null;
+function updateHover(){
+  raycaster.setFromCamera(mouse,camera);
+  const hits=raycaster.intersectObjects(layerMeshes,false);
+  const tip=document.getElementById('tooltip');
+  const obj=hits.length?hits[0].object:null;
+  if(hovered && hovered!==obj){ hovered.material.emissiveIntensity=hovered.userData.baseEm; if(hovered.material.transparent) hovered.material.opacity=hovered.userData.baseOpacity; }
+  hovered=obj;
+  if(obj){ obj.material.emissiveIntensity=Math.min(1.5,obj.userData.baseEm+.35); if(obj.material.transparent) obj.material.opacity=Math.min(.85,obj.userData.baseOpacity+.25);
+    tip.innerHTML=t(obj.userData.key); tip.style.display='block'; const wrap=document.getElementById('threeWrap');
+    let x=S.mousePx.x+14,y=S.mousePx.y+14; if(x+270>wrap.clientWidth) x=S.mousePx.x-274; if(y+90>wrap.clientHeight) y=S.mousePx.y-90; tip.style.left=x+'px'; tip.style.top=y+'px';
+  } else tip.style.display='none';
+}
+
+/* =====================================================================================
+   4. HISTOGRAMA (Chart.js) + AJUSTE GAUSSIANA + RECTA (Levenberg–Marquardt en JS)
+   ===================================================================================== */
+let chart, chartDirty=false, lastChartTs=0;
+
+/** Bandas de color por región de masa (ver nota 14 del encabezado): identifican de un
+ *  vistazo las resonancias/rangos conocidos dentro del espectro de dimuones, inspiradas
+ *  en (pero NO idénticas a) la leyenda de la diapositiva "Triggering on di-muons..." de
+ *  CMS/CERN — esa leyenda clasifica por RUTA DE DISPARO (trigger path), un concepto
+ *  distinto al de "ventana de masa" usado aquí, ya que el CSV educativo no trae esa
+ *  información por evento. Colores tomados de la paleta ya existente de la app.
+ */
+const MASS_REGIONS=[
+  {key:'mr_omega_phi', min:0.60, max:1.10, color:'#8c9096', peak:[{m:0.7827,lbl:'ω'},{m:1.0195,lbl:'φ'}]},
+  {key:'mr_jpsi',       min:2.90, max:3.30, color:'#d62839', peak:[{m:3.0969,lbl:'J/ψ'}]},
+  {key:'mr_psi2s',      min:3.55, max:3.85, color:'#1a4d7a', peak:[{m:3.6861,lbl:"ψ'"}]},
+  {key:'mr_upsilon',    min:9.00, max:10.60,color:'#4c9a4c', peak:[{m:9.4603,lbl:'Υ'}]},
+  {key:'mr_z0',         min:75.0, max:105.0,color:'#f2a900', peak:[{m:91.1876,lbl:'Z⁰'}]},
+];
+function regionForMass(m){ for(const r of MASS_REGIONS){ if(m>=r.min && m<r.max) return r; } return null; }
+function regionBarColor(m,alpha){ const r=regionForMass(m); return r? hexToRgba(r.color,alpha) : 'rgba(47,155,214,'+alpha+')'; }
+function hexToRgba(hex,a){ const v=hex.replace('#',''); const n=parseInt(v,16); const r=(n>>16)&255,g=(n>>8)&255,b=n&255; return 'rgba('+r+','+g+','+b+','+a+')'; }
+
+/** Plugin nativo de Chart.js (sin dependencias nuevas) que dibuja líneas de referencia
+ *  PDG punteadas + su etiqueta, solo para los picos que caen dentro del rango visible. */
+const resonanceLinesPlugin={
+  id:'resonanceLines',
+  afterDatasetsDraw(c){
+    const {ctx,chartArea,scales}=c; if(!chartArea) return;
+    const xs=scales.x; if(!xs) return;
+    ctx.save();
+    for(const r of MASS_REGIONS){ for(const p of r.peak){
+      if(p.m<xs.min || p.m>xs.max) continue;
+      const px=xs.getPixelForValue(p.m); if(!isFinite(px)) continue;
+      ctx.beginPath(); ctx.setLineDash([3,3]); ctx.strokeStyle=r.color; ctx.globalAlpha=0.85; ctx.lineWidth=1;
+      ctx.moveTo(px,chartArea.top); ctx.lineTo(px,chartArea.bottom); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha=1; ctx.fillStyle=r.color; ctx.font="11px 'Aptos','Calibri','Segoe UI',system-ui,sans-serif";
+      const tw=ctx.measureText(p.lbl).width; let tx=px-tw/2; tx=Math.max(chartArea.left+2,Math.min(chartArea.right-tw-2,tx));
+      ctx.fillText(p.lbl, tx, chartArea.top+11);
+    }}
+    ctx.restore();
+  }
+};
+Chart.register(resonanceLinesPlugin);
+
+function initChart(){
+  const ctx=document.getElementById('histChart').getContext('2d');
+  Chart.defaults.color='#c7c9cc'; Chart.defaults.borderColor='#23242e'; Chart.defaults.font.family="'Aptos','Calibri','Segoe UI',system-ui,Roboto,Arial,sans-serif";
+  chart=new Chart(ctx,{type:'bar',data:{datasets:[
+      {type:'bar',label:t('ch_counts'),data:[],backgroundColor:'rgba(47,155,214,0.75)',borderColor:'#5ec8e8',borderWidth:1,barPercentage:1,categoryPercentage:1,order:2},
+      {type:'line',label:t('ch_fit'),data:[],borderColor:'#f2a900',borderWidth:2.2,pointRadius:0,tension:0.25,order:1}
+    ]},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,parsing:{xAxisKey:'x',yAxisKey:'y'},
+      plugins:{legend:{labels:{boxWidth:12,font:{size:11}}},tooltip:{callbacks:{title:items=>'M ≈ '+Number(items[0].parsed.x).toFixed(3)+' GeV'}}},
+      scales:{x:{type:'linear',min:0,max:120,offset:false,grid:{color:'#1a1b24'},title:{display:true,text:t('ax_m'),font:{size:11}}},
+              y:{type:'linear',beginAtZero:true,grid:{color:'#1a1b24'},title:{display:true,text:t('ax_n'),font:{size:11}}}}}});
+  buildChartLegend();
+}
+
+function buildChartLegend(){
+  const box=document.getElementById('chartLegend'); if(!box) return;
+  box.innerHTML=MASS_REGIONS.map(r=>
+    '<span class="crl"><i style="background:'+r.color+'"></i>'+t(r.key)+'</span>'
+  ).join('') + '<span class="crl"><i style="background:rgba(47,155,214,0.75)"></i>'+t('mr_other')+'</span>';
+}
+
+function resetHistogram(){
+  S.counts=new Array(S.nbins).fill(0); S.inRange=0; S.sumM=0; S.sumM2=0;
+  const w=(S.rmax-S.rmin)/S.nbins;
+  for(const m of S.masses){ if(m>=S.rmin && m<S.rmax){ S.counts[Math.min(S.nbins-1,Math.floor((m-S.rmin)/w))]++; S.inRange++; S.sumM+=m; S.sumM2+=m*m; } }
+  chartDirty=true;
+}
+function addMass(m){
+  S.masses.push(m);
+  if(m>=S.rmin && m<S.rmax){ const w=(S.rmax-S.rmin)/S.nbins; S.counts[Math.min(S.nbins-1,Math.floor((m-S.rmin)/w))]++; S.inRange++; S.sumM+=m; S.sumM2+=m*m; }
+  chartDirty=true;
+}
+
+function solveLinear(A,b){ // eliminación gaussiana con pivoteo parcial
+  const n=b.length, M=A.map((r,i)=>[...r,b[i]]);
+  for(let c=0;c<n;c++){ let p=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[p][c])) p=r; if(Math.abs(M[p][c])<1e-14) return null; [M[c],M[p]]=[M[p],M[c]];
+    for(let r=c+1;r<n;r++){ const f=M[r][c]/M[c][c]; for(let k=c;k<=n;k++) M[r][k]-=f*M[c][k]; } }
+  const x=new Array(n); for(let r=n-1;r>=0;r--){ let s=M[r][n]; for(let k=r+1;k<n;k++) s-=M[r][k]*x[k]; x[r]=s/M[r][r]; } return x;
+}
+/** Ajuste f(x)=a+b·x+A·exp(−(x−μ)²/2σ²) por mínimos cuadrados ponderados (Poisson) con Levenberg–Marquardt */
+function fitSignalBkg(xs,ys){
+  const n=xs.length; if(n<8) return null;
+  const k=Math.max(2,Math.floor(n/6)); let xl=0,yl=0,xr=0,yr=0;
+  for(let i=0;i<k;i++){ xl+=xs[i]/k; yl+=ys[i]/k; xr+=xs[n-1-i]/k; yr+=ys[n-1-i]/k; }
+  let b1=(xr!==xl)?(yr-yl)/(xr-xl):0, b0=yl-b1*xl;
+  let imax=0,rmax=-Infinity; for(let i=0;i<n;i++){ const r=ys[i]-(b0+b1*xs[i]); if(r>rmax){rmax=r;imax=i;} }
+  const width=xs[n-1]-xs[0];
+  let p=[Math.max(rmax,1e-3), xs[imax], width/10, b0, b1];
+  const w=ys.map(y=>1/Math.max(y,1));
+  const model=(p,x)=>p[3]+p[4]*x+p[0]*Math.exp(-0.5*((x-p[1])/p[2])**2);
+  const chi2=p=>{ let s=0; for(let i=0;i<n;i++){ const d=ys[i]-model(p,xs[i]); s+=w[i]*d*d; } return s; };
+  let lambda=1e-2, c=chi2(p), conv=false;
+  for(let it=0;it<300;it++){
+    const H=[...Array(5)].map(()=>new Array(5).fill(0)), g=new Array(5).fill(0);
+    for(let i=0;i<n;i++){ const x=xs[i], u=(x-p[1])/p[2], e=Math.exp(-0.5*u*u);
+      const J=[e, p[0]*e*u/p[2], p[0]*e*u*u/p[2], 1, x]; const r=ys[i]-model(p,x);
+      for(let a=0;a<5;a++){ g[a]+=w[i]*J[a]*r; for(let b=0;b<5;b++) H[a][b]+=w[i]*J[a]*J[b]; } }
+    const Hd=H.map((row,i)=>row.map((v,j)=>i===j?v*(1+lambda)+1e-12:v));
+    const dp=solveLinear(Hd,g); if(!dp){ lambda*=10; if(lambda>1e12) break; continue; }
+    const pn=p.map((v,i)=>v+dp[i]); pn[2]=Math.abs(pn[2])||width/50;
+    const cn=chi2(pn);
+    if(cn<c){ if(Math.abs(c-cn)<1e-10*Math.max(1,c)) conv=true; p=pn; c=cn; lambda=Math.max(lambda/3,1e-12); if(conv) break; }
+    else { lambda*=4; if(lambda>1e12) break; }
+  }
+  const good = p[1]>xs[0] && p[1]<xs[n-1] && p[2]<width && p[0]>0;
+  return {A:p[0],mu:p[1],sigma:p[2],b0:p[3],b1:p[4],chi2:c,ndf:Math.max(1,n-5),model:x=>model(p,x),good};
+}
+
+function fmt(v,d){ return (v===null||v===undefined||!isFinite(v))?'—':Number(v).toFixed(d); }
+
+/** Recuadro divulgativo "¿Qué significa este resultado?" (ver nota 9 del encabezado). */
+const REFS=[{name:'Z⁰',m:91.1876},{name:'J/ψ',m:3.0969}];
+function refreshResolutionBox(fit){
+  const box=document.getElementById('resBox');
+  if(!fit||!fit.good||!(fit.sigma>0)){ box.style.display='none'; return; }
+  const ref=REFS.reduce((a,b)=>Math.abs(fit.mu-a.m)<Math.abs(fit.mu-b.m)?a:b);
+  const d=Math.abs(fit.mu-ref.m), nsig=d/fit.sigma;
+  const small=fit.mu<10, dS=small?4:3;
+  const verdict=nsig<=1?t('res_within'):(nsig<=3?t('res_near'):t('res_far'));
+  const s=fmt(fit.sigma,small?4:3);
+  const html=
+    '<p>'+t('res_p1')+'</p>'+
+    '<p>'+t('res_p2',{s, pct:fmt(100*fit.sigma/fit.mu,2)})+'</p>'+
+    '<p>'+t('res_p3',{mu:fmt(fit.mu,dS), ref:ref.m.toFixed(4), name:ref.name, d:fmt(d,dS), dpct:fmt(100*d/ref.m,3), verdict})+'</p>'+
+    '<p class="'+(S.finished?'rb-done':'rb-note')+'">'+(S.finished?t('res_done',{n:S.inRange.toLocaleString()}):t('res_live',{n:S.inRange.toLocaleString()}))+'</p>'+
+    '<p class="rb-note">'+(ref.name==='Z⁰'?t('res_note_z'):t('res_note_j'))+'</p>';
+  document.getElementById('rbTitle').textContent=t('res_title');
+  document.getElementById('rbBody').innerHTML=html;
+  box.style.display='block';
+}
+
+function refreshChart(force){
+  if(!chart) return;
+  chartDirty=false;
+  const w=(S.rmax-S.rmin)/S.nbins; const xs=[],ys=[],bars=[],barColors=[],barBorders=[];
+  for(let i=0;i<S.nbins;i++){ const xc=S.rmin+(i+.5)*w; xs.push(xc); ys.push(S.counts[i]||0); bars.push({x:xc,y:S.counts[i]||0});
+    const reg=regionForMass(xc); barColors.push(reg?hexToRgba(reg.color,0.78):'rgba(47,155,214,0.75)'); barBorders.push(reg?reg.color:'#5ec8e8'); }
+  chart.data.datasets[0].data=bars;
+  chart.data.datasets[0].backgroundColor=barColors;
+  chart.data.datasets[0].borderColor=barBorders;
+  // ejes
+  const logX=document.getElementById('logX').checked, logY=document.getElementById('logY').checked;
+  chart.options.scales.x.type=(logX&&S.rmin>0)?'logarithmic':'linear';
+  chart.options.scales.x.min=(logX&&S.rmin<=0)?Math.max(w/2,1e-3):S.rmin; chart.options.scales.x.max=S.rmax;
+  chart.options.scales.y.type=logY?'logarithmic':'linear';
+  // ajuste
+  let fit=null;
+  if(S.inRange>=30) fit=fitSignalBkg(xs,ys);
+  S.lastFit=fit;
+  const showFit=document.getElementById('showFit').checked;
+  if(fit && showFit){ const pts=[]; for(let i=0;i<=240;i++){ const x=S.rmin+(S.rmax-S.rmin)*i/240; const y=fit.model(x); pts.push({x, y: logY?Math.max(y,1e-3):y}); } chart.data.datasets[1].data=pts; }
+  else chart.data.datasets[1].data=[];
+  chart.update('none');
+  // parámetros
+  document.getElementById('fMu').textContent=fit?fmt(fit.mu,fit.mu<10?4:3):'—';
+  document.getElementById('fSig').textContent=fit?fmt(fit.sigma,fit.sigma<1?4:3):'—';
+  document.getElementById('fA').textContent=fit?fmt(fit.A,1):'—';
+  document.getElementById('fB0').textContent=fit?fmt(fit.b0,2):'—';
+  document.getElementById('fB1').textContent=fit?fmt(fit.b1,3):'—';
+  document.getElementById('fChi').textContent=fit?fmt(fit.chi2/fit.ndf,2):'—';
+  const msg=document.getElementById('fitMsg');
+  if(!fit) msg.textContent=t('fit_wait');
+  else if(!fit.good) msg.textContent=t('fit_bad');
+  else { const d=Math.min(Math.abs(fit.mu-91.1876),Math.abs(fit.mu-3.0969)); msg.textContent=t('fit_ok',{n:S.inRange.toLocaleString(),d:d.toFixed(3)}); }
+  refreshResolutionBox(fit);
+  // estadísticas
+  document.getElementById('stTotal').textContent=S.total.toLocaleString();
+  document.getElementById('stAcc').textContent=S.accepted.toLocaleString();
+  document.getElementById('stRej').textContent=S.rejected.toLocaleString();
+  document.getElementById('stIn').textContent=S.inRange.toLocaleString();
+  if(S.inRange>0){ const mean=S.sumM/S.inRange; const varr=Math.max(0,S.sumM2/S.inRange-mean*mean); document.getElementById('stMean').textContent=fmt(mean,3); document.getElementById('stStd').textContent=fmt(Math.sqrt(varr),3); }
+  else { document.getElementById('stMean').textContent='—'; document.getElementById('stStd').textContent='—'; }
+  const pf=document.getElementById('progressFill'); pf.style.width=(S.limit?100*S.idx/S.limit:0)+'%';
+}
+
+/* =====================================================================================
+   5. REPRODUCCIÓN / ESTADO / UI
+   ===================================================================================== */
+function getLimit(){ const sel=document.getElementById('countSel').value; if(sel==='all') return S.rows.length; if(sel==='custom') return Math.min(S.rows.length,Math.max(1,parseInt(document.getElementById('countCustom').value)||1)); return Math.min(S.rows.length,parseInt(sel)); }
+function refreshCountInfo(){ S.limit=getLimit(); document.getElementById('countInfo').textContent=S.rows.length?t('count_info',{n:S.limit.toLocaleString(),t:S.rows.length.toLocaleString()}):''; }
+function getSpeed(){ const v=+document.getElementById('speed').value; return Math.round(Math.pow(10, v/100*3.3)); }
+function updateSpeedLabel(){ document.getElementById('speedVal').textContent=getSpeed().toLocaleString(); }
+
+/** Estado visual de los botones Play/Pausa y la etiqueta de pausa sobre la vista 3D. */
+function updatePlayButtons(){
+  const bp=document.getElementById('btnPlay'), bpa=document.getElementById('btnPause');
+  bp.classList.toggle('playing',S.playing);
+  bpa.classList.toggle('paused',S.frozen && !S.playing);
+  document.getElementById('pauseTag').style.display=(S.frozen && !S.playing && tracks.length)?'block':'none';
+}
+function play(){
+  if(!S.rows.length) return; refreshCountInfo(); if(S.idx>=S.limit) return;
+  S.playing=true; S.frozen=false; S.finished=false; updatePlayButtons();
+}
+function pause(){ S.playing=false; S.frozen=true; updatePlayButtons(); }
+
+function resetSession(){
+  S.idx=0; S.acc=0; S.playing=false; S.frozen=false; S.finished=false; S.total=0; S.accepted=0; S.rejected=0; S.masses=[]; S.lastEvent=null; S.lastResult=null;
+  clearTracks();
+  refreshCountInfo(); resetHistogram(); refreshEventPanel(); refreshChart(true); updatePlayButtons();
+}
+
+function processEvents(n, durOverride){
+  if(!S.rows.length) return;
+  const speed=getSpeed(); let last=null, lastRes=null, processed=0;
+  for(let i=0;i<n;i++){
+    if(S.idx>=S.limit){ S.playing=false; S.finished=true; break; }
+    const row=S.rows[S.idx++]; const res=analyzeEvent(row);
+    S.total++; if(res.accepted){ S.accepted++; addMass(res.M); } else S.rejected++;
+    last=row; lastRes=res; processed++;
+  }
+  if(last){
+    S.lastEvent=last; S.lastResult=lastRes;
+    const dur = (durOverride!==undefined) ? durOverride : (speed<=40?Math.min(0.6,0.9/speed):0);
+    spawnTracks(last,lastRes,dur); refreshEventPanel();
+  }
+  chartDirty=true;
+  if(S.finished){ refreshEventPanel(); updatePlayButtons(); }
+}
+
+function refreshEventPanel(){
+  const b=document.getElementById('evBadge'); const r=S.lastResult, e=S.lastEvent;
+  if(!r){ b.className='badge none'; b.textContent=S.finished?t('ev_done'):t('ev_none'); ['evId','evQ','evM2','evM','evMu1','evP1','evMu2','evP2'].forEach(id=>document.getElementById(id).textContent='—'); return; }
+  if(r.accepted){ b.className='badge ok'; b.textContent=t('ev_ok'); } else { b.className='badge no'; b.textContent=r.okQ?t('ev_no_m'):t('ev_no_q'); }
+  document.getElementById('evId').textContent=(e.Run!==undefined?e.Run:'?')+' / '+(e.Event!==undefined?e.Event:'?');
+  document.getElementById('evQ').textContent=(e.Q1>0?'+':'')+e.Q1+' + '+(e.Q2>0?'+':'')+e.Q2+' = '+r.Q;
+  document.getElementById('evM2').textContent=fmt(r.M2,3);
+  document.getElementById('evM').textContent=r.accepted?fmt(r.M,4):'—';
+  document.getElementById('evMu1').textContent='E='+fmt(e.E1,3)+', Q='+(e.Q1>0?'+1':'−1');
+  document.getElementById('evP1').textContent='('+fmt(e.px1,2)+', '+fmt(e.py1,2)+', '+fmt(e.pz1,2)+')';
+  document.getElementById('evMu2').textContent='E='+fmt(e.E2,3)+', Q='+(e.Q2>0?'+1':'−1');
+  document.getElementById('evP2').textContent='('+fmt(e.px2,2)+', '+fmt(e.py2,2)+', '+fmt(e.pz2,2)+')';
+}
+
+/* Bucle principal con delta-time real (ver nota 10):
+   - S.playing: se acumulan eventos proporcionales al tiempo transcurrido.
+   - S.frozen (pausa o paso ya dibujado): NO se avanza el estado de las trayectorias,
+     así que quedan exactamente como estaban; la cámara y el hover siguen activos.
+   - Tras un "Paso", la animación corta del evento sigue hasta completarse y luego
+     se congela (stepAnim). */
+let lastTs=performance.now(), stepAnim=false;
+function loop(ts){
+  requestAnimationFrame(loop);
+  const dt=Math.min(0.1,(ts-lastTs)/1000); lastTs=ts;
+  if(S.playing){ S.acc+=dt*getSpeed(); const n=Math.floor(S.acc); if(n>0){ S.acc-=n; processEvents(Math.min(n,5000)); } }
+  if(S.playing){ updateTracks(dt); }
+  else if(stepAnim){ updateTracks(dt); if(tracks.every(tr=>tr.done)){ stepAnim=false; S.frozen=true; updatePlayButtons(); } }
+  else if(!S.frozen){ updateTracks(dt); }
+  updateHover(); controls.update(); renderer.render(scene,camera);
+  if(chartDirty && ts-lastChartTs>150){ lastChartTs=ts; refreshChart(); }
+}
+
+function setRange(min,max,bins,presetBtn){
+  S.rmin=min; S.rmax=max; S.nbins=bins;
+  document.getElementById('rMin').value=min; document.getElementById('rMax').value=max; document.getElementById('nBins').value=bins;
+  ['preZ','preJ','preAll'].forEach(id=>document.getElementById(id).classList.toggle('active',id===presetBtn));
+  resetHistogram(); refreshChart(true);
+}
+function readRangeInputs(){
+  let min=parseFloat(document.getElementById('rMin').value), max=parseFloat(document.getElementById('rMax').value), bins=parseInt(document.getElementById('nBins').value);
+  if(!isFinite(min)) min=0; if(!isFinite(max)||max<=min) max=min+1; bins=Math.min(400,Math.max(5,bins||50));
+  setRange(min,max,bins,null);
+}
+
+function bindUI(){
+  // pestañas
+  document.getElementById('tabSim').onclick=()=>{ document.getElementById('tabSim').classList.add('active'); document.getElementById('tabCode').classList.remove('active'); document.getElementById('simView').classList.add('active'); document.getElementById('codeView').classList.remove('active'); };
+  document.getElementById('tabCode').onclick=()=>{ document.getElementById('tabCode').classList.add('active'); document.getElementById('tabSim').classList.remove('active'); document.getElementById('codeView').classList.add('active'); document.getElementById('simView').classList.remove('active'); };
+  // idioma
+  document.getElementById('langEs').onclick=()=>{ lang='es'; applyLang(); };
+  document.getElementById('langEn').onclick=()=>{ lang='en'; applyLang(); };
+  // modales
+  const about=document.getElementById('aboutModal'), edu=document.getElementById('eduModal');
+  const openEdu=()=>{ edu.classList.add('open'); renderMath(); buildEduNav(); };
+  document.getElementById('btnAbout').onclick=()=>about.classList.add('open');
+  document.getElementById('aboutClose1').onclick=document.getElementById('aboutClose2').onclick=()=>about.classList.remove('open');
+  document.getElementById('btnAboutEdu').onclick=()=>{ about.classList.remove('open'); openEdu(); };
+  document.getElementById('btnEdu').onclick=openEdu;
+  document.getElementById('eduClose1').onclick=document.getElementById('eduClose2').onclick=()=>edu.classList.remove('open');
+  [about,edu].forEach(m=>m.addEventListener('click',e=>{ if(e.target===m) m.classList.remove('open'); }));
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ about.classList.remove('open'); edu.classList.remove('open'); } });
+  // archivo
+  const dz=document.getElementById('dropzone'), fi=document.getElementById('fileInput');
+  dz.onclick=()=>fi.click(); fi.onchange=()=>loadFile(fi.files[0]);
+  dz.addEventListener('dragover',e=>{ e.preventDefault(); dz.classList.add('over'); });
+  dz.addEventListener('dragleave',()=>dz.classList.remove('over'));
+  dz.addEventListener('drop',e=>{ e.preventDefault(); dz.classList.remove('over'); if(e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]); });
+  document.body.addEventListener('dragover',e=>e.preventDefault()); document.body.addEventListener('drop',e=>e.preventDefault());
+  // carga por URL
+  const urlInput=document.getElementById('urlInput'), btnLoadUrl=document.getElementById('btnLoadUrl');
+  btnLoadUrl.onclick=()=>loadFromUrl(urlInput.value);
+  urlInput.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); loadFromUrl(urlInput.value); } });
+  // rango
+  document.getElementById('preZ').onclick=()=>setRange(75,105,60,'preZ');
+  document.getElementById('preJ').onclick=()=>setRange(2.9,3.3,40,'preJ');
+  document.getElementById('preAll').onclick=()=>setRange(0,120,120,'preAll');
+  ['rMin','rMax','nBins'].forEach(id=>document.getElementById(id).addEventListener('change',readRangeInputs));
+  // cantidad
+  document.getElementById('countSel').onchange=()=>{ document.getElementById('countCustom').style.display=document.getElementById('countSel').value==='custom'?'block':'none'; refreshCountInfo(); if(S.idx>=S.limit) S.finished=true; };
+  document.getElementById('countCustom').onchange=refreshCountInfo;
+  // reproducción
+  document.getElementById('btnPlay').onclick=play;
+  document.getElementById('btnPause').onclick=pause;
+  document.getElementById('btnStep').onclick=()=>{
+    if(!S.rows.length) return;
+    S.playing=false; S.frozen=false; refreshCountInfo();
+    clearTracks();                       // solo se ve el evento del paso actual
+    processEvents(1, 0.45);              // animación corta y luego queda congelado
+    stepAnim=true; updatePlayButtons();
+  };
+  document.getElementById('btnReset').onclick=()=>resetSession();
+  document.getElementById('speed').oninput=updateSpeedLabel;
+  ['logX','logY','showFit'].forEach(id=>document.getElementById(id).onchange=()=>refreshChart(true));
+  document.addEventListener('keydown',e=>{ if(e.target.tagName==='TEXTAREA'||e.target.tagName==='INPUT'||e.target.tagName==='SELECT') return; if(e.code==='Space'){ e.preventDefault(); if(S.playing) pause(); else play(); } });
+}
+
+/* =====================================================================================
+   6. CONSOLA DE CÓDIGO PYTHON (Pyodide: numpy + pandas + scipy + matplotlib)
+   ===================================================================================== */
+let pyodide=null, pyReady=false, pyBusy=false, pyStatusKey='py_idle';
+const SNIPPETS=[
+ {k:'sn_explore', code:
+`# Exploración inicial del dataset (como en el notebook)
+print("Filas x columnas:", datos.shape)
+print("Columnas:", list(datos.columns))
+datos.head()`},
+ {k:'sn_q', code:
+`# 1) Carga del candidato a dimuon: Q = Q1 + Q2
+datos['dimuonQ'] = datos['Q1'] + datos['Q2']
+print("Distribución de la carga total:")
+print(datos['dimuonQ'].value_counts().sort_index())
+
+# 2) Conservar solo los eventos con carga total nula (candidatos a partícula neutra)
+datos = datos[datos['dimuonQ'] == 0]
+print("\\nEventos con Q = 0:", len(datos))
+datos[['Run','Event','Q1','Q2','dimuonQ']].head()`},
+ {k:'sn_m2', code:
+`# 3) Masa invariante al cuadrado: M² = (E1+E2)² − (px1+px2)² − (py1+py2)² − (pz1+pz2)²
+datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2
+                     - (datos['px1'] + datos['px2'])**2
+                     - (datos['py1'] + datos['py2'])**2
+                     - (datos['pz1'] + datos['pz2'])**2 )
+print("Eventos con M² <= 0 (combinaciones falsas / ruido):", (datos['dimuonM2'] <= 0).sum())
+
+# 4) Conservar solo M² > 0
+datos = datos[datos['dimuonM2'] > 0]
+
+# 5) Masa invariante final
+datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+print("Eventos válidos:", len(datos))
+print("Primer evento del dataset: M =", round(float(datos['dimuonM'].iloc[0]), 4), "GeV  (esperado ≈ 17.49 GeV)")
+if 'M' in datos.columns:
+    print("Diferencia máxima con la columna M del CSV:", float((datos['dimuonM'] - datos['M']).abs().max()))
+datos[['E1','px1','py1','pz1','E2','px2','py2','pz2','dimuonM2','dimuonM']].head()`},
+ {k:'sn_hist', code:
+`# 6) Histograma de la masa invariante en todo el espectro (escala logarítmica en Y)
+if 'dimuonM' not in datos.columns:
+    # Este fragmento es autosuficiente: si aún no corriste los pasos 1-3 (o pulsaste
+    # "Recargar \`datos\`"), aquí se aplican automáticamente para que nunca truene.
+    datos = datos[(datos['Q1'] + datos['Q2']) == 0].copy()
+    datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2
+                         - (datos['px1'] + datos['px2'])**2
+                         - (datos['py1'] + datos['py2'])**2
+                         - (datos['pz1'] + datos['pz2'])**2 )
+    datos = datos[datos['dimuonM2'] > 0]
+    datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+    print(f"(Auto: se aplicaron los pasos de carga Q=0 y masa invariante → {len(datos)} eventos válidos)")
+plt.figure(figsize=(8,4.5))
+plt.hist(datos['dimuonM'], bins=300, range=(0,120), log=True, color='#2f9bd6', edgecolor='#5ec8e8', linewidth=0.3)
+plt.axvline(91.1876, color='#f2a900', ls='--', lw=1, label='Z⁰ (91.19 GeV)')
+plt.axvline(3.0969,  color='#d62839', ls='--', lw=1, label='J/ψ (3.10 GeV)')
+plt.xlabel('Masa invariante M [GeV]'); plt.ylabel('Eventos'); plt.title('Dimuones — CMS Open Data')
+plt.legend(); plt.tight_layout(); plt.show()`},
+ {k:'sn_z', code:
+`# Zoom al pico del bosón Z⁰ (75–105 GeV)
+if 'dimuonM' not in datos.columns:
+    datos = datos[(datos['Q1'] + datos['Q2']) == 0].copy()
+    datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2 - (datos['px1'] + datos['px2'])**2
+                         - (datos['py1'] + datos['py2'])**2 - (datos['pz1'] + datos['pz2'])**2 )
+    datos = datos[datos['dimuonM2'] > 0]
+    datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+    print(f"(Auto: se aplicaron los pasos de carga Q=0 y masa invariante → {len(datos)} eventos válidos)")
+sel = datos[(datos['dimuonM'] > 75) & (datos['dimuonM'] < 105)]
+print("Eventos en el rango del Z⁰:", len(sel))
+plt.figure(figsize=(8,4.5))
+plt.hist(sel['dimuonM'], bins=60, range=(75,105), color='#2f9bd6', edgecolor='#5ec8e8', linewidth=0.3)
+plt.axvline(91.1876, color='#f2a900', ls='--', label='Z⁰ (PDG)')
+plt.xlabel('M [GeV]'); plt.ylabel('Eventos'); plt.legend(); plt.tight_layout(); plt.show()`},
+ {k:'sn_fit', code:
+`# 7) Ajuste señal + ruido: gaussiana + recta (equivalente a GaussianModel + LinearModel de lmfit)
+from scipy.optimize import curve_fit
+
+if 'dimuonM' not in datos.columns:
+    datos = datos[(datos['Q1'] + datos['Q2']) == 0].copy()
+    datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2 - (datos['px1'] + datos['px2'])**2
+                         - (datos['py1'] + datos['py2'])**2 - (datos['pz1'] + datos['pz2'])**2 )
+    datos = datos[datos['dimuonM2'] > 0]
+    datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+    print(f"(Auto: se aplicaron los pasos de carga Q=0 y masa invariante → {len(datos)} eventos válidos)")
+
+def modelo(x, a, b, A, mu, sigma):
+    return a + b*x + A*np.exp(-(x-mu)**2/(2*sigma**2))
+
+rango, nbins = (75, 105), 60
+sel = datos[(datos['dimuonM'] > rango[0]) & (datos['dimuonM'] < rango[1])]
+cuentas, bordes = np.histogram(sel['dimuonM'], bins=nbins, range=rango)
+centros = 0.5*(bordes[1:] + bordes[:-1])
+errores = np.sqrt(np.maximum(cuentas, 1))          # incertidumbre de Poisson
+
+p0 = [cuentas[:5].mean(), 0.0, cuentas.max(), 91.0, 3.0]
+popt, pcov = curve_fit(modelo, centros, cuentas, p0=p0, sigma=errores, absolute_sigma=True)
+perr = np.sqrt(np.diag(pcov))
+nombres = ['intercepto a', 'pendiente b', 'amplitud A', 'centro mu', 'sigma']
+for n_, v, e in zip(nombres, popt, perr):
+    print(f"{n_:>14s} = {v:10.4f} ± {e:.4f}")
+chi2 = np.sum(((cuentas - modelo(centros, *popt))/errores)**2)
+print(f"chi2/ndf = {chi2:.1f}/{len(cuentas)-5} = {chi2/(len(cuentas)-5):.2f}")
+print(f"Masa del Z⁰ ajustada: {popt[3]:.3f} GeV  (PDG: 91.1876 GeV)")
+
+xx = np.linspace(*rango, 400)
+plt.figure(figsize=(8,4.5))
+plt.errorbar(centros, cuentas, yerr=errores, fmt='o', ms=3, color='#5ec8e8', label='datos')
+plt.plot(xx, modelo(xx, *popt), color='#f2a900', lw=2, label='gaussiana + recta')
+plt.plot(xx, popt[0] + popt[1]*xx, color='#d62839', ls='--', label='fondo lineal')
+plt.xlabel('M [GeV]'); plt.ylabel('Eventos'); plt.legend(); plt.tight_layout(); plt.show()`},
+ {k:'sn_jpsi', code:
+`# Pico del mesón J/ψ (2.9–3.3 GeV) y ajuste gaussiana + recta
+from scipy.optimize import curve_fit
+
+if 'dimuonM' not in datos.columns:
+    datos = datos[(datos['Q1'] + datos['Q2']) == 0].copy()
+    datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2 - (datos['px1'] + datos['px2'])**2
+                         - (datos['py1'] + datos['py2'])**2 - (datos['pz1'] + datos['pz2'])**2 )
+    datos = datos[datos['dimuonM2'] > 0]
+    datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+    print(f"(Auto: se aplicaron los pasos de carga Q=0 y masa invariante → {len(datos)} eventos válidos)")
+
+def modelo(x, a, b, A, mu, sigma):
+    return a + b*x + A*np.exp(-(x-mu)**2/(2*sigma**2))
+
+rango, nbins = (2.9, 3.3), 40
+sel = datos[(datos['dimuonM'] > rango[0]) & (datos['dimuonM'] < rango[1])]
+print("Eventos en el rango del J/ψ:", len(sel))
+cuentas, bordes = np.histogram(sel['dimuonM'], bins=nbins, range=rango)
+centros = 0.5*(bordes[1:] + bordes[:-1])
+if cuentas.sum() >= 30:
+    p0 = [cuentas[:4].mean(), 0.0, cuentas.max(), 3.097, 0.03]
+    popt, pcov = curve_fit(modelo, centros, cuentas, p0=p0, sigma=np.sqrt(np.maximum(cuentas,1)))
+    print(f"centro mu = {popt[3]:.4f} ± {np.sqrt(pcov[3,3]):.4f} GeV  (PDG: 3.0969 GeV)")
+    print(f"sigma     = {popt[4]:.4f} ± {np.sqrt(pcov[4,4]):.4f} GeV")
+    xx = np.linspace(*rango, 400)
+    plt.figure(figsize=(8,4.5))
+    plt.hist(sel['dimuonM'], bins=nbins, range=rango, color='#2f9bd6', edgecolor='#5ec8e8', linewidth=0.3, label='datos')
+    plt.plot(xx, modelo(xx, *popt), color='#f2a900', lw=2, label='ajuste')
+    plt.xlabel('M [GeV]'); plt.ylabel('Eventos'); plt.legend(); plt.tight_layout(); plt.show()
+else:
+    print("Muy pocos eventos en el rango: procesa más eventos o usa un dataset mayor.")`},
+ {k:'sn_lmfit', code:
+`# Ajuste con lmfit (requiere haber pulsado "Instalar lmfit"); reproduce el notebook original
+try:
+    from lmfit.models import GaussianModel, LinearModel
+except ImportError:
+    raise ImportError("lmfit no está instalado: pulsa el botón 'Instalar lmfit' o usa el fragmento con scipy.")
+
+if 'dimuonM' not in datos.columns:
+    datos = datos[(datos['Q1'] + datos['Q2']) == 0].copy()
+    datos['dimuonM2'] = ( (datos['E1'] + datos['E2'])**2 - (datos['px1'] + datos['px2'])**2
+                         - (datos['py1'] + datos['py2'])**2 - (datos['pz1'] + datos['pz2'])**2 )
+    datos = datos[datos['dimuonM2'] > 0]
+    datos['dimuonM'] = np.sqrt(datos['dimuonM2'])
+    print(f"(Auto: se aplicaron los pasos de carga Q=0 y masa invariante → {len(datos)} eventos válidos)")
+
+rango, nbins = (75, 105), 60
+sel = datos[(datos['dimuonM'] > rango[0]) & (datos['dimuonM'] < rango[1])]
+cuentas, bordes = np.histogram(sel['dimuonM'], bins=nbins, range=rango)
+centros = 0.5*(bordes[1:] + bordes[:-1])
+
+gauss = GaussianModel(prefix='g_'); fondo = LinearModel(prefix='l_')
+modelo = gauss + fondo
+params = gauss.guess(cuentas, x=centros) + fondo.make_params(l_slope=0, l_intercept=cuentas.min())
+resultado = modelo.fit(cuentas, params, x=centros, weights=1/np.sqrt(np.maximum(cuentas,1)))
+print(resultado.fit_report())
+
+plt.figure(figsize=(8,4.5))
+plt.plot(centros, cuentas, 'o', ms=3, color='#5ec8e8', label='datos')
+plt.plot(centros, resultado.best_fit, color='#f2a900', lw=2, label='gauss + recta (lmfit)')
+plt.xlabel('M [GeV]'); plt.ylabel('Eventos'); plt.legend(); plt.tight_layout(); plt.show()`},
+];
+
+function buildSnippets(){
+  const list=document.getElementById('snippetList'); list.innerHTML='';
+  SNIPPETS.forEach(s=>{ const d=document.createElement('div'); d.className='snippet'; d.innerHTML='<div class="t">'+t(s.k)+'</div><div class="d">'+t(s.k+'_d')+'</div>'; d.onclick=()=>{ document.getElementById('pyEditor').value=s.code; }; list.appendChild(d); });
+  if(!document.getElementById('pyEditor').value) document.getElementById('pyEditor').value=SNIPPETS[0].code;
+}
+function outAppend(html,cls){ const o=document.getElementById('pyOut'); const d=document.createElement('div'); if(cls) d.className=cls; if(cls==='html') d.innerHTML=html; else d.textContent=html; o.appendChild(d); o.scrollTop=o.scrollHeight; }
+function setPyStatus(key,vars,dot){ pyStatusKey=key; S.pyVars=vars; document.getElementById('pyStatus').textContent=t(key,vars); document.getElementById('pyDot').className='dot '+(dot||''); }
+function refreshPyStatus(){ document.getElementById('pyStatus').textContent=t(pyStatusKey,S.pyVars); }
+
+function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('No se pudo cargar '+src)); document.head.appendChild(s); }); }
+
+async function initPy(){
+  if(pyodide||pyBusy) return; pyBusy=true;
+  document.getElementById('btnInitPy').disabled=true; setPyStatus('py_loading',null,'busy');
+  try{
+    await loadScript('https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js');
+    pyodide=await loadPyodide({indexURL:'https://cdn.jsdelivr.net/pyodide/v0.25.1/full/'});
+    await pyodide.loadPackage(['numpy','pandas','scipy','matplotlib']);
+    pyodide.setStdout({batched:s=>outAppend(s)}); pyodide.setStderr({batched:s=>outAppend(s,'err')});
+    await pyodide.runPythonAsync(`
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np, pandas as pd, io, base64
+plt.style.use('dark_background')
+plt.rcParams['figure.facecolor'] = '#0a0a0f'; plt.rcParams['axes.facecolor'] = '#0f1016'
+plt.rcParams['axes.edgecolor'] = '#8c9096'; plt.rcParams['grid.color'] = '#23242e'
+def _grab_figs():
+    out = []
+    for n in plt.get_fignums():
+        buf = io.BytesIO(); plt.figure(n).savefig(buf, format='png', dpi=100, facecolor='#0a0a0f'); out.append(base64.b64encode(buf.getvalue()).decode())
+    plt.close('all'); return out
+`);
+    pyReady=true; document.getElementById('btnRunPy').disabled=false; document.getElementById('btnReloadData').disabled=false; document.getElementById('btnLmfit').disabled=false;
+    if(S.csvText) loadDataIntoPy(); else setPyStatus('py_ready_nodata',null,'ready');
+  }catch(e){ setPyStatus('py_error',{e:e.message},'err'); document.getElementById('btnInitPy').disabled=false; }
+  pyBusy=false;
+}
+function loadDataIntoPy(){
+  if(!pyReady) return;
+  if(!S.csvText){ setPyStatus('py_ready_nodata',null,'ready'); return; }
+  pyodide.globals.set('_csv_text', S.csvText);
+  pyodide.runPython(`datos = pd.read_csv(io.StringIO(_csv_text))\ndatos.columns = [c.strip() for c in datos.columns]\n_n = len(datos)`);
+  setPyStatus('py_ready',{n:pyodide.globals.get('_n')},'ready');
+}
+async function runPy(){
+  if(!pyReady||pyBusy) return;
+  if(!S.csvText){ outAppend(t('py_no_data'),'err'); return; }
+  pyBusy=true; setPyStatus('py_running',null,'busy'); document.getElementById('btnRunPy').disabled=true;
+  const code=document.getElementById('pyEditor').value;
+  outAppend('>>> '+code.split('\n')[0]+(code.includes('\n')?' …':''),'info');
+  try{
+    const res=await pyodide.runPythonAsync(code);
+    if(res!==undefined && res!==null){
+      if(typeof res.to_html==='function'){ outAppend(res.to_html({max_rows:30}), 'html'); }
+      else { const s=String(res); if(s && s!=='None') outAppend(s); }
+      if(typeof res.destroy==='function') res.destroy();
+    }
+    const figs=pyodide.runPython('_grab_figs()').toJs();
+    figs.forEach(b64=>outAppend('<img src="data:image/png;base64,'+b64+'">','html'));
+  }catch(e){ outAppend(String(e.message||e).split('\n').filter(l=>!l.includes('pyodide')).join('\n'),'err'); }
+  document.getElementById('btnRunPy').disabled=false; pyBusy=false;
+  setPyStatus(S.csvText?'py_ready':'py_ready_nodata',{n:S.rows.length.toLocaleString()},'ready');
+}
+async function installLmfit(){
+  if(!pyReady||pyBusy) return; pyBusy=true; setPyStatus('lmfit_try',null,'busy'); outAppend(t('lmfit_try'),'info');
+  try{ await pyodide.loadPackage('micropip'); await pyodide.runPythonAsync('import micropip\nawait micropip.install("lmfit")\nimport lmfit'); outAppend(t('lmfit_ok'),'ok'); }
+  catch(e){ outAppend(t('lmfit_fail',{e:(e.message||'').split('\n')[0]}),'err'); }
+  pyBusy=false; setPyStatus('py_ready',{n:S.rows.length.toLocaleString()},'ready');
+}
+function bindPy(){
+  document.getElementById('btnInitPy').onclick=initPy;
+  document.getElementById('btnRunPy').onclick=runPy;
+  document.getElementById('btnReloadData').onclick=loadDataIntoPy;
+  document.getElementById('btnLmfit').onclick=installLmfit;
+  document.getElementById('btnClearOut').onclick=()=>{ document.getElementById('pyOut').innerHTML=''; };
+  document.getElementById('pyEditor').addEventListener('keydown',e=>{ if(e.ctrlKey&&e.key==='Enter'){ e.preventDefault(); runPy(); } if(e.key==='Tab'){ e.preventDefault(); const ta=e.target, s=ta.selectionStart; ta.value=ta.value.slice(0,s)+'    '+ta.value.slice(ta.selectionEnd); ta.selectionStart=ta.selectionEnd=s+4; } });
+}
+
+/* =====================================================================================
+   7. ARRANQUE
+   ===================================================================================== */
+window.addEventListener('DOMContentLoaded',()=>{
+  init3D(); initChart(); bindUI(); bindPy();
+  S.counts=new Array(S.nbins).fill(0);
+  applyLang();
+  requestAnimationFrame(loop);
+});
+</script>
+</body>
+</html>
