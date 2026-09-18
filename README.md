@@ -4,7 +4,6 @@ Simulador visual e interactivo de reconstrucción de masa invariante de eventos 
 
 Reproduce, evento a evento y en el navegador, el mismo flujo de análisis de un notebook académico (carga total del par, filtro de candidatos neutros, cálculo de M² y M, histograma acumulado con ajuste señal + fondo) sincronizado con una representación 3D esquemática del detector CMS, incluyendo una vista de corte que deja un lado abierto para seguir las trayectorias de los muones sin obstrucciones.
 
-** Pruébalo en vivo:** *(se agrega automáticamente aquí en cuanto se active GitHub Pages)*
 
 ## Qué incluye
 
